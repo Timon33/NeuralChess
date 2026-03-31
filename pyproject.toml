@@ -1,0 +1,30 @@
+[project]
+name = "neuralchess"
+version = "0.1.0"
+description = "A lightweight neural chess engine using a CNN trained on Stockfish evaluations"
+requires-python = ">=3.13"
+dependencies = [
+    "torch>=2.5.0",
+    "python-chess>=1.999",
+    "pandas>=2.2.0",
+    "numpy>=2.0.0",
+]
+
+[project.scripts]
+neuralchess-play = "neuralchess.play:main"
+neuralchess-uci = "neuralchess.uci:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
