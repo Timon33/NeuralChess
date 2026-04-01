@@ -169,7 +169,7 @@ def main() -> None:
         help=f"Encoder architecture: {available_encoders} (default: bitboard)",
     )
     parser.add_argument(
-        "--max-rows", type=int, default=100000, help="Limit to N rows (default: 100000)"
+        "--max-rows", type=int, default=None, help="Limit to N rows (default: all)"
     )
     parser.add_argument(
         "--output-dir", type=str, default="data", help="Base output directory"

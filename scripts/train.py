@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -118,7 +119,14 @@ def train_epoch(
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")  # type: ignore[attr-defined]
 
     optimizer.zero_grad()
-    for batch_idx, (inputs, targets) in enumerate(loader):
+    pbar = tqdm(
+        loader,
+        desc="Training",
+        leave=False,
+        dynamic_ncols=True,
+        unit="batch",
+    )
+    for batch_idx, (inputs, targets) in enumerate(pbar):
         inputs = inputs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True).unsqueeze(1)
 
@@ -137,6 +145,7 @@ def train_epoch(
 
         total_loss += loss.item() * grad_accum
         num_batches += 1
+        pbar.set_postfix({"loss": f"{total_loss / num_batches:.4f}"})
 
     if num_batches % grad_accum != 0:
         scaler.step(optimizer)
@@ -158,7 +167,14 @@ def validate(
     total_loss = 0.0
     num_batches = 0
 
-    for inputs, targets in loader:
+    pbar = tqdm(
+        loader,
+        desc="Validating",
+        leave=False,
+        dynamic_ncols=True,
+        unit="batch",
+    )
+    for inputs, targets in pbar:
         inputs = inputs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True).unsqueeze(1)
 
@@ -170,6 +186,7 @@ def validate(
 
         total_loss += loss.item()
         num_batches += 1
+        pbar.set_postfix({"loss": f"{total_loss / num_batches:.4f}"})
 
     return total_loss / num_batches if num_batches > 0 else float("inf")
 
@@ -258,7 +275,13 @@ def main() -> None:
 
     checkpoint_path = os.path.join(args.checkpoint_dir, "best.pt")
 
-    for epoch in range(start_epoch, args.epochs):
+    epoch_pbar = tqdm(
+        range(start_epoch, args.epochs),
+        desc="Training",
+        dynamic_ncols=True,
+        unit="epoch",
+    )
+    for epoch in epoch_pbar:
         train_loss = train_epoch(
             model,
             train_loader,
@@ -272,10 +295,12 @@ def main() -> None:
         scheduler.step(val_loss)
 
         current_lr = optimizer.param_groups[0]["lr"]
-        print(
-            f"Epoch {epoch + 1}/{args.epochs} | "
-            f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | "
-            f"LR: {current_lr:.6f}"
+        epoch_pbar.set_postfix(
+            {
+                "train_loss": f"{train_loss:.4f}",
+                "val_loss": f"{val_loss:.4f}",
+                "lr": f"{current_lr:.6f}",
+            }
         )
 
         if val_loss < best_val_loss:
@@ -290,9 +315,9 @@ def main() -> None:
                 model_type,
                 model_config,
             )
-            print(f"  Saved best checkpoint (val_loss={val_loss:.6f})")
+            print(f"  Saved best checkpoint (val_loss={val_loss:.4f})")
 
-    print(f"Training complete. Best val loss: {best_val_loss:.6f}")
+    print(f"Training complete. Best val loss: {best_val_loss:.4f}")
 
 
 if __name__ == "__main__":
