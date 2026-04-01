@@ -115,7 +115,7 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     num_batches = 0
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")  # type: ignore[attr-defined]
 
     optimizer.zero_grad()
     for batch_idx, (inputs, targets) in enumerate(loader):
@@ -190,6 +190,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-samples", type=int, default=None)
     return parser.parse_args()
 
 
@@ -200,7 +201,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    dataset = ChessDataset(args.data_dir)
+    dataset = ChessDataset(args.data_dir, max_positions=args.max_samples)
     val_size = int(len(dataset) * args.val_split)
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
