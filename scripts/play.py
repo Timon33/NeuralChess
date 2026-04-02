@@ -3,6 +3,7 @@ Interactive CLI game loop for NeuralChess.
 """
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,8 @@ import chess
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from neuralchess.engine import NeuralEngine
+
+logger = logging.getLogger(__name__)
 
 PIECE_ASCII = {
     chess.PAWN: "pP",
@@ -34,7 +37,7 @@ def print_board(board: chess.Board) -> None:
                 row += ". "
             else:
                 is_white = piece.color == chess.WHITE
-                symbol = PIECE_ASCII[piece.piece_type][0 if is_white else 1]
+                symbol = PIECE_ASCII[piece.piece_type][1 if is_white else 0]
                 row += f"{symbol} "
         print(row)
     print("  a b c d e f g h")
@@ -66,9 +69,25 @@ def main() -> None:
     parser.add_argument(
         "--color", choices=["white", "black", "random"], default="white"
     )
+    parser.add_argument("--depth", type=int, default=64, help="Maximum search depth")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--show-evals",
+        action="store_true",
+        help="Show eval scores for all legal moves after engine plays",
+    )
     args = parser.parse_args()
 
-    engine = NeuralEngine(args.checkpoint)
+    if args.debug:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(name)s [%(levelname)s] %(message)s",
+        )
+        logging.getLogger("neuralchess").setLevel(logging.INFO)
+    else:
+        logging.basicConfig(level=logging.WARNING)
+
+    engine = NeuralEngine(args.checkpoint, debug=args.debug)
     board = chess.Board()
 
     if args.color == "random":
@@ -108,17 +127,35 @@ def main() -> None:
         else:
             print("Engine thinking...")
             start = time.time()
-            move, score, pv = engine.search(board, movetime_ms=args.movetime)
+            move, score, pv = engine.search(
+                board, movetime_ms=args.movetime, max_depth=args.depth
+            )
             elapsed = time.time() - start
 
             if move is not None:
                 board.push(move)
-                pv_str = " ".join(m.uci() for m in pv[:5])
+                pv_str = " ".join(m.uci() for m in pv)
                 print(
                     f"Engine plays: {move.uci()} (score: {score * 100:.1f}%, time: {elapsed:.1f}s)"
                 )
                 if pv_str:
                     print(f"PV: {pv_str}")
+
+                if args.show_evals:
+                    print("\nAll legal moves ranked by eval:")
+                    results = engine.evaluate_all_moves(board)
+                    for i, (m, s, tag) in enumerate(results):
+                        marker = " <-- played" if m == move else ""
+                        print(
+                            f"  {i + 1:2d}. {m.uci():5s}  score={s:+.4f}  [{tag}]{marker}"
+                        )
+                    scores = [s for _, s, _ in results]
+                    score_range = max(scores) - min(scores)
+                    print(
+                        f"\n  Score range: [{min(scores):+.4f}, {max(scores):+.4f}] "
+                        f"(spread={score_range:.4f})"
+                    )
+                    print()
 
         print_board(board)
         print_status(board)

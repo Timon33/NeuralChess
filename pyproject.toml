@@ -9,6 +9,8 @@ dependencies = [
     "pandas>=2.2.0",
     "numpy>=2.0.0",
     "tqdm>=4.67.3",
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
 ]
 
 [project.scripts]

@@ -15,11 +15,12 @@ from neuralchess.engine import NeuralEngine
 
 
 class UCIHandler:
-    def __init__(self, engine: NeuralEngine) -> None:
+    def __init__(self, engine: NeuralEngine, debug: bool = False) -> None:
         self.engine = engine
         self.board = chess.Board()
         self.movetime_ms: int = 1000
         self.searching = False
+        self.debug = debug
 
     def loop(self) -> None:
         while True:
@@ -53,6 +54,7 @@ class UCIHandler:
         print("id name NeuralChess")
         print("id author NeuralChess")
         print("option name movetime type spin default 1000 min 10 max 60000")
+        print("option name debug type check default false")
         print("uciok")
 
     def _handle_isready(self) -> None:
@@ -123,6 +125,23 @@ class UCIHandler:
         pv_str = " ".join(m.uci() for m in pv) if pv else ""
         print(f"info depth {depth} score cp {score_cp} pv {pv_str}".strip())
 
+        if self.debug:
+            stats = self.engine.get_stats()
+            tt_total = stats.tt_hits + stats.tt_misses
+            tt_hit_rate = (stats.tt_hits / tt_total * 100) if tt_total > 0 else 0
+            cutoff_rate = stats.beta_cutoffs / max(stats.nodes_searched, 1) * 100
+
+            print(
+                f"info string nodes {stats.nodes_searched} "
+                f"tt_hits {stats.tt_hits} tt_misses {stats.tt_misses} "
+                f"tt_hit_rate {tt_hit_rate:.1f}% "
+                f"beta_cutoffs {stats.beta_cutoffs} "
+                f"cutoff_rate {cutoff_rate:.1f}% "
+                f"eval_calls {stats.eval_calls} "
+                f"tt_stores {stats.tt_stores}",
+                flush=True,
+            )
+
         if best_move is not None:
             print(f"bestmove {best_move.uci()}")
         else:
@@ -138,6 +157,8 @@ class UCIHandler:
                 name = args[i + 1].lower()
                 if name == "movetime" and i + 3 < len(args) and args[i + 2] == "value":
                     self.movetime_ms = int(args[i + 3])
+                elif name == "debug" and i + 3 < len(args) and args[i + 2] == "value":
+                    self.debug = args[i + 3].lower() == "true"
                 i += 4
             else:
                 i += 1
@@ -146,10 +167,25 @@ class UCIHandler:
 def main() -> None:
     parser = argparse.ArgumentParser(description="NeuralChess UCI engine")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint")
+    parser.add_argument(
+        "--debug", action="store_true", help="Enable verbose debug logging to stderr"
+    )
     args = parser.parse_args()
 
-    engine = NeuralEngine(args.checkpoint)
-    handler = UCIHandler(engine)
+    def info_callback(
+        depth: int, score: float, pv: list, nodes: int, nps: int, time_ms: int
+    ) -> None:
+        pv_str = " ".join(m.uci() for m in pv[:5])
+        score_cp = int(score * 100)
+        print(
+            f"info depth {depth} score cp {score_cp} nodes {nodes} nps {nps} time {time_ms} pv {pv_str}",
+            flush=True,
+        )
+
+    engine = NeuralEngine(
+        args.checkpoint, info_callback=info_callback if args.debug else None
+    )
+    handler = UCIHandler(engine, debug=args.debug)
     handler.loop()
 
 
