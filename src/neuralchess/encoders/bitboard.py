@@ -7,6 +7,9 @@ Channel 12: Side to move (all 1s = white, all 0s = black)
 Channel 13: Castling availability (1s on squares with castling rights)
 """
 
+import re
+
+import numpy as np
 import torch
 
 from neuralchess.encoders.base import PositionEncoder
@@ -32,6 +35,8 @@ CASTLING_SQUARES: dict[str, list[int]] = {
     "k": [4, 7],
     "q": [4, 0],
 }
+
+_FEN_BOARD_RE = re.compile(r"^([1-8kqrbnpKQRBNP/]+)\s+([wb])\s+([KQkq-]+)\s")
 
 
 class BitboardEncoder(PositionEncoder):
@@ -72,3 +77,36 @@ class BitboardEncoder(PositionEncoder):
     @property
     def name(self) -> str:
         return "bitboard"
+
+    def encode_batch(self, fens: list[str]) -> np.ndarray:
+        n = len(fens)
+        out = np.zeros((n, 14, 8, 8), dtype=np.float32)
+
+        for i, fen in enumerate(fens):
+            m = _FEN_BOARD_RE.search(fen)
+            if not m:
+                raise ValueError(f"Invalid FEN: {fen}")
+            board_str, turn, castling = m.group(1), m.group(2), m.group(3)
+
+            row = 0
+            col = 0
+            for char in board_str:
+                if char == "/":
+                    row += 1
+                    col = 0
+                elif char.isdigit():
+                    col += int(char)
+                else:
+                    channel = PIECE_TO_CHANNEL[char]
+                    out[i, channel, row, col] = 1.0
+                    col += 1
+
+            if turn == "w":
+                out[i, 12, :, :] = 1.0
+
+            for castle_char in castling:
+                if castle_char in CASTLING_SQUARES:
+                    for sq in CASTLING_SQUARES[castle_char]:
+                        out[i, 13, sq // 8, sq % 8] = 1.0
+
+        return out
