@@ -2,12 +2,13 @@
 Neural chess engine with alpha-beta search, transposition table, and batched inference.
 """
 
+import logging
 import math
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
 import chess
 import torch
@@ -16,6 +17,8 @@ from neuralchess.encoders import get_encoder
 from neuralchess.encoders.base import PositionEncoder
 from neuralchess.models.base import ChessModel
 from neuralchess.zobrist import ZobristHasher
+
+logger = logging.getLogger(__name__)
 
 
 class SearchTimeout(Exception):
@@ -36,33 +39,54 @@ class TTEntry:
     best_move: Optional[chess.Move]
 
 
+@dataclass
+class SearchStats:
+    nodes_searched: int = 0
+    tt_hits: int = 0
+    tt_misses: int = 0
+    beta_cutoffs: int = 0
+    eval_calls: int = 0
+    qsearch_nodes: int = 0
+    tt_stores: int = 0
+
+
 class NeuralEngine:
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: Optional[str] = None,
+        model: Optional[ChessModel] = None,
         device: Optional[torch.device] = None,
         max_tt_size: int = 1_000_000,
+        info_callback: Optional[Callable] = None,
+        debug: bool = False,
     ) -> None:
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
 
-        checkpoint = torch.load(
-            checkpoint_path, map_location=device, weights_only=False
-        )
-        self.model = self._build_model_from_checkpoint(checkpoint)
-        self.model.eval()
+        if model is not None:
+            self.model = model
+            self.encoder: PositionEncoder = get_encoder("bitboard")
+        elif checkpoint_path is not None:
+            checkpoint = torch.load(
+                checkpoint_path, map_location=device, weights_only=False
+            )
+            self.model = self._build_model_from_checkpoint(checkpoint)
+            self.encoder = get_encoder(checkpoint.get("encoder_name", "bitboard"))
+        else:
+            raise ValueError("Either checkpoint_path or model must be provided")
 
-        self.encoder: PositionEncoder = get_encoder(
-            checkpoint.get("encoder_name", "bitboard")
-        )
+        self.model.eval()
+        self.model.to(self.device)
 
         self._zobrist = ZobristHasher()
         self.tt: OrderedDict[int, TTEntry] = OrderedDict()
         self.max_tt_size = max_tt_size
 
-        self.nodes_searched: int = 0
+        self.stats = SearchStats()
+        self._info_callback: Optional[Callable] = info_callback
         self._time_check_interval: int = 1024
+        self._debug = debug
 
     @staticmethod
     def _build_model_from_checkpoint(checkpoint: dict) -> ChessModel:
@@ -111,14 +135,25 @@ class NeuralEngine:
 
         if len(legal_moves) == 1:
             score = self._evaluate_position(board.fen())
+            if self._debug:
+                logger.info(
+                    f"Only legal move: {legal_moves[0].uci()}, eval={score:.4f}"
+                )
             return legal_moves[0], score, [legal_moves[0]]
 
         self.tt.clear()
-        self.nodes_searched = 0
+        self.stats = SearchStats()
+
+        if self._debug:
+            logger.info(
+                f"Starting iterative deepening search (time_limit={time_limit_ms}ms)"
+            )
 
         for depth in range(1, max_depth + 1):
             elapsed_ms = (time.time() - start_time) * 1000
             if elapsed_ms > time_limit_ms:
+                if self._debug:
+                    logger.info(f"Time limit reached at depth {depth}, stopping")
                 break
 
             move, score, pv = self._search_root(
@@ -130,7 +165,58 @@ class NeuralEngine:
                 best_score = score
                 best_pv = pv
 
+                elapsed_ms = (time.time() - start_time) * 1000
+                nps = int(self.stats.nodes_searched / max(elapsed_ms / 1000, 0.001))
+                if self._debug:
+                    pv_str = " ".join(m.uci() for m in pv[:5])
+                    logger.info(
+                        f"d{depth} score={score:+.4f} pv={pv_str} "
+                        f"nodes={self.stats.nodes_searched} nps={nps} "
+                        f"tt_hit={self.stats.tt_hits} tt_miss={self.stats.tt_misses} "
+                        f"cutoffs={self.stats.beta_cutoffs}"
+                    )
+                if self._info_callback:
+                    self._info_callback(
+                        depth=depth,
+                        score=score,
+                        pv=pv,
+                        nodes=self.stats.nodes_searched,
+                        nps=nps,
+                        time_ms=int(elapsed_ms),
+                    )
+
         return best_move, best_score, best_pv
+
+    def get_stats(self) -> SearchStats:
+        return self.stats
+
+    @property
+    def nodes_searched(self) -> int:
+        return self.stats.nodes_searched
+
+    def evaluate_all_moves(
+        self, board: chess.Board
+    ) -> list[tuple[chess.Move, float, str]]:
+        results: list[tuple[chess.Move, float, str]] = []
+        for move in board.legal_moves:
+            tag = self._move_tag(board, move)
+            board.push(move)
+            score = self._evaluate_position(board.fen())
+            board.pop()
+            results.append((move, -score, tag))
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
+
+    @staticmethod
+    def _move_tag(board: chess.Board, move: chess.Move) -> str:
+        tags: list[str] = []
+        if board.is_capture(move):
+            tags.append("capture")
+        if move.promotion:
+            tags.append("promotion")
+        if board.gives_check(move):
+            tags.append("check")
+        return ",".join(tags) if tags else "quiet"
 
     def _search_root(
         self,
@@ -181,23 +267,31 @@ class NeuralEngine:
         start_time: float,
         time_limit_ms: int,
     ) -> tuple[float, list[chess.Move]]:
-        self.nodes_searched += 1
+        self.stats.nodes_searched += 1
 
-        if self.nodes_searched % self._time_check_interval == 0:
+        if self.stats.nodes_searched % self._time_check_interval == 0:
             elapsed_ms = (time.time() - start_time) * 1000
             if elapsed_ms > time_limit_ms:
                 raise SearchTimeout()
 
         if board.is_game_over():
-            return self._game_over_score(board), []
+            score = self._game_over_score(board)
+            if self._debug:
+                logger.debug(f"Game-over at depth {depth}: score={score:.4f}")
+            return score, []
 
-        tt_entry = self.tt.get(self._zobrist.hash_board(board))
+        zobrist_key = self._zobrist.hash_board(board)
+        tt_entry = self.tt.get(zobrist_key)
         if tt_entry is not None and tt_entry.depth >= depth:
+            self.stats.tt_hits += 1
             score = self._tt_score(tt_entry, alpha, beta)
             if score is not None:
                 return score, self._tt_pv(tt_entry, board)
+        else:
+            self.stats.tt_misses += 1
 
         if depth == 0:
+            self.stats.eval_calls += 1
             return self._evaluate_position(board.fen()), []
 
         legal_moves = list(board.legal_moves)
@@ -232,12 +326,14 @@ class NeuralEngine:
                     flag = TTFlag.EXACT
 
                     if score >= beta:
+                        self.stats.beta_cutoffs += 1
                         flag = TTFlag.BETA
                         break
 
         self._store_tt(
             self._zobrist.hash_board(board), depth, best_score, flag, best_move
         )
+        self.stats.tt_stores += 1
 
         return best_score, best_pv
 
@@ -245,6 +341,8 @@ class NeuralEngine:
         tensor = self.encoder.encode(fen).unsqueeze(0).to(self.device)
         with torch.no_grad():
             score = self.model(tensor).item()
+        if self._debug:
+            logger.debug(f"Eval: fen={fen[:20]}... score={score:.6f}")
         return float(score)
 
     def _order_moves(
