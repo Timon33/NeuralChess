@@ -236,6 +236,7 @@ def main() -> None:
     print(f"Device: {device}")
 
     dataset = ChessDataset(args.data_dir, max_positions=args.max_samples)
+    print(f"Data loaded. Dataset size: {len(dataset)}")
     val_size = int(len(dataset) * args.val_split)
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
@@ -245,7 +246,7 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=True if device.type == "cuda" else False,
         prefetch_factor=2 if args.num_workers > 0 else None,
     )
     val_loader = DataLoader(
@@ -253,7 +254,7 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=True if device.type == "cuda" else False,
         prefetch_factor=2 if args.num_workers > 0 else None,
     )
 
@@ -286,7 +287,7 @@ def main() -> None:
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=2
+        optimizer, mode="min", factor=0.1, patience=2
     )
     criterion = nn.MSELoss()
 
