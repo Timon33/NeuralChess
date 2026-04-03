@@ -96,7 +96,7 @@ class NeuralChessNet(ChessModel):
         x = self.bridge(x)
         x = self.residual_tower(x)
         x = self.gap(x).squeeze(-1).squeeze(-1)
-        return torch.tanh(self.fc(x))
+        return torch.sigmoid(self.fc(x))
 
     @classmethod
     def from_checkpoint(
