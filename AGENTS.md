@@ -2,6 +2,10 @@
 
 NeuralChess is a lightweight neural chess engine supporting multiple model architectures (CNN, transformer, etc.) trained on Stockfish evaluations from Kaggle datasets. It uses python-chess for board logic.
 
+## General
+
+IMPORTANT: always use context7 and exa search to find up-to-date documentation
+
 ## Architecture Reference
 
 ### Position Encoders
