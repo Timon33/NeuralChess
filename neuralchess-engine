@@ -1,2 +1,2 @@
 #!/bin/bash
-/home/xyper/code/NeuralChess/.venv/bin/python /home/xyper/code/NeuralChess/scripts/uci.py --checkpoint /home/xyper/code/NeuralChess/checkpoints/best.pt --debug "$@"
+/home/xyper/code/NeuralChess/.venv/bin/python /home/xyper/code/NeuralChess/src/neuralchess/uci.py --checkpoint /home/xyper/code/NeuralChess/checkpoints/best.pt --debug --log engine.log "$@"

@@ -1,61 +1,22 @@
 """
-Neural chess engine with alpha-beta search, transposition table, and batched inference.
+Neural chess engine with alpha-beta search and batched inference.
 """
 
 import logging
-import math
-import threading
-import time
-from collections import OrderedDict
-from dataclasses import dataclass
-from enum import Enum
-from typing import Optional
+from typing import Optional, List, Tuple
 
 import chess
 import torch
 
 from neuralchess.models.base import ChessModel
-from neuralchess.zobrist import ZobristHasher
 
 logger = logging.getLogger(__name__)
-
-
-class SearchInterrupt(Exception):
-    pass
-
-
-class TTFlag(Enum):
-    EXACT = 0
-    ALPHA = 1
-    BETA = 2
-
-
-@dataclass
-class TTEntry:
-    depth: int
-    score: float
-    flag: TTFlag
-    best_move: Optional[chess.Move]
-
-
-@dataclass
-class SearchStats:
-    nodes_searched: int = 0
-    tt_hits: int = 0
-    tt_misses: int = 0
-    beta_cutoffs: int = 0
-    eval_calls: int = 0
-    qsearch_nodes: int = 0
-    tt_stores: int = 0
-
 
 class NeuralEngine:
     def __init__(
         self,
         model: ChessModel,
         device: Optional[torch.device] = None,
-        max_tt_size: int = 1_000_000,
-        debug: bool = False,
     ) -> None:
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,293 +25,36 @@ class NeuralEngine:
         self.model.eval()
         self.model.to(self.device)
 
-        self._zobrist = ZobristHasher()
-        self.tt: OrderedDict[int, TTEntry] = OrderedDict()
-        self.max_tt_size = max_tt_size
-
-        self.stats = SearchStats()
-        self._time_check_interval: int = 1024
-        self._debug = debug
-
-    def search(
-        self,
-        board: chess.Board,
-        max_depth: int = 64,
-        stop_event: Optional[threading.Event] = None,
-    ) -> tuple[Optional[chess.Move], float, list[chess.Move]]:
-
-        start_time = time.time()
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
-            return None, 0.0, []
-
-        best_move = legal_moves[0]
-        best_score = self._evaluate_position(board.fen())
-        best_pv = [best_move]
-
-        if len(legal_moves) == 1:
-            if self._debug:
-                logger.info(
-                    f"Only legal move: {legal_moves[0].uci()}, eval={best_score:.4f}"
-                )
-            return best_move, best_score, best_pv
-
-        self.tt.clear()
-        self.stats = SearchStats()
-
-        if self._debug:
-            logger.info("Starting iterative deepening search")
-
-        for depth in range(1, max_depth + 1):
-            if stop_event and stop_event.is_set():
-                break
-
-            try:
-                move, score, pv = self._search_root(
-                    board, depth, legal_moves, stop_event
-                )
-            except SearchInterrupt:
-                break
-
-            if move is not None:
-                best_move = move
-                best_score = score
-                best_pv = pv
-
-                elapsed_ms = (time.time() - start_time) * 1000
-                nps = int(self.stats.nodes_searched / max(elapsed_ms / 1000, 0.001))
-                if self._debug:
-                    pv_str = " ".join(m.uci() for m in pv)
-                    logger.info(
-                        f"d{depth} score={score:+.4f} pv={pv_str} "
-                        f"nodes={self.stats.nodes_searched} nps={nps} "
-                        f"tt_hit={self.stats.tt_hits} tt_miss={self.stats.tt_misses} "
-                        f"cutoffs={self.stats.beta_cutoffs}"
-                    )
-
-        return best_move, best_score, best_pv
-
-    def get_stats(self) -> SearchStats:
-        return self.stats
-
-    @property
-    def nodes_searched(self) -> int:
-        return self.stats.nodes_searched
-
-    def evaluate_all_moves(
-        self, board: chess.Board
-    ) -> list[tuple[chess.Move, float, str]]:
-        results: list[tuple[chess.Move, float, str]] = []
-        for move in board.legal_moves:
-            tag = self._move_tag(board, move)
-            board.push(move)
-            score = self._evaluate_position(board.fen())
-            board.pop()
-            results.append((move, -score, tag))
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results
-
-    @staticmethod
-    def _move_tag(board: chess.Board, move: chess.Move) -> str:
-        tags: list[str] = []
-        if board.is_capture(move):
-            tags.append("capture")
-        if move.promotion:
-            tags.append("promotion")
-        if board.gives_check(move):
-            tags.append("check")
-        return ",".join(tags) if tags else "quiet"
-
-    def _search_root(
-        self,
-        board: chess.Board,
-        depth: int,
-        legal_moves: list[chess.Move],
-        stop_event: Optional[threading.Event] = None,
-    ) -> tuple[Optional[chess.Move], float, list[chess.Move]]:
-        best_move: Optional[chess.Move] = None
-        best_score = -math.inf
-        best_pv: list[chess.Move] = []
-
-        ordered_moves = self._order_moves(board, legal_moves)
-
-        for move in ordered_moves:
-            if stop_event and stop_event.is_set():
-                raise SearchInterrupt()
-
-            board.push(move)
-            try:
-                score, pv = self._alphabeta(
-                    board, depth - 1, -math.inf, math.inf, stop_event
-                )
-            except SearchInterrupt:
-                board.pop()
-                raise
-            score = -score
-            board.pop()
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-                best_pv = [move] + pv
-
-        return best_move, best_score, best_pv
-
-    def _alphabeta(
-        self,
-        board: chess.Board,
-        depth: int,
-        alpha: float,
-        beta: float,
-        stop_event: Optional[threading.Event] = None,
-    ) -> tuple[float, list[chess.Move]]:
-        self.stats.nodes_searched += 1
-
-        if self.stats.nodes_searched % self._time_check_interval == 0:
-            if stop_event and stop_event.is_set():
-                raise SearchInterrupt()
-
-        if board.is_game_over():
-            score = self._game_over_score(board)
-            if self._debug:
-                logger.debug(f"Game-over at depth {depth}: score={score:.4f}")
-            return score, []
-
-        zobrist_key = self._zobrist.hash_board(board)
-        tt_entry = self.tt.get(zobrist_key)
-        if tt_entry is not None and tt_entry.depth >= depth:
-            self.stats.tt_hits += 1
-            score = self._tt_score(tt_entry, alpha, beta)
-            if score is not None:
-                return score, self._tt_pv(tt_entry, board)
-        else:
-            self.stats.tt_misses += 1
-
-        if depth == 0:
-            self.stats.eval_calls += 1
-            return self._evaluate_position(board.fen()), []
-
+    def evaluate_position(self, board: chess.Board) -> List[Tuple[float, chess.Move]]:
+        logger.debug(f"Evaluating \n{board}")
         legal_moves = list(board.legal_moves)
 
-        tt_best = tt_entry.best_move if tt_entry else None
-        ordered_moves = self._order_moves(board, legal_moves, tt_best)
+        positions_to_eval = []
+        moves_to_eval = []
+        game_over_moves = []
 
-        best_score = -math.inf
-        best_move: Optional[chess.Move] = None
-        best_pv: list[chess.Move] = []
-        flag = TTFlag.ALPHA
-
-        for move in ordered_moves:
+        for move in legal_moves:
             board.push(move)
-            try:
-                score, pv = self._alphabeta(board, depth - 1, -beta, -alpha, stop_event)
-            except SearchInterrupt:
-                board.pop()
-                raise
-            score = -score
+            if board.is_game_over():
+                game_over_moves.append((self._game_over_score(board), move))
+            else:
+                positions_to_eval.append(board.fen())
+                moves_to_eval.append(move)
             board.pop()
 
-            if score > best_score:
-                best_score = score
-                best_move = move
-                best_pv = [move] + pv
+        eval_scores = self.model.evaluate(positions_to_eval)
 
-                if score > alpha:
-                    alpha = score
-                    flag = TTFlag.EXACT
+        scored_moves = game_over_moves + list(zip(eval_scores, moves_to_eval))
+        sorted_scored_scores = sorted(scored_moves, key=lambda x: x[0], reverse=board.turn)
 
-                    if score >= beta:
-                        self.stats.beta_cutoffs += 1
-                        flag = TTFlag.BETA
-                        break
+        logger.debug(f"Evaluated {len(legal_moves)} legal moves")
+        for (score, move) in sorted_scored_scores:
+            logger.debug(f"{move}: {score}")
 
-        self._store_tt(
-            self._zobrist.hash_board(board), depth, best_score, flag, best_move
-        )
-        self.stats.tt_stores += 1
-
-        return best_score, best_pv
-
-    def _evaluate_position(self, fen: str) -> float:
-        self.stats.eval_calls += 1
-        scores = self.model.evaluate([fen])
-        return scores[0]
-
-    def _order_moves(
-        self,
-        board: chess.Board,
-        moves: list[chess.Move],
-        tt_best: Optional[chess.Move] = None,
-    ) -> list[chess.Move]:
-        def move_score(move: chess.Move) -> int:
-            if tt_best is not None and move == tt_best:
-                return 100_000
-
-            score = 0
-            if board.is_capture(move):
-                victim = board.piece_at(move.to_square)
-                attacker = board.piece_at(move.from_square)
-                victim_value = (
-                    self._piece_value(victim)
-                    if victim
-                    else (1 if board.is_en_passant(move) else 0)
-                )
-                attacker_value = self._piece_value(attacker) if attacker else 0
-                score = 10 * victim_value - attacker_value
-
-            if move.promotion:
-                score += 900
-
-            return score
-
-        return sorted(moves, key=move_score, reverse=True)
-
-    @staticmethod
-    def _piece_value(piece: Optional[chess.Piece]) -> int:
-        if piece is None:
-            return 0
-        return {
-            chess.PAWN: 1,
-            chess.KNIGHT: 3,
-            chess.BISHOP: 3,
-            chess.ROOK: 5,
-            chess.QUEEN: 9,
-            chess.KING: 0,
-        }.get(piece.piece_type, 0)
-
-    def _store_tt(
-        self,
-        zobrist: int,
-        depth: int,
-        score: float,
-        flag: TTFlag,
-        best_move: Optional[chess.Move],
-    ) -> None:
-        if len(self.tt) >= self.max_tt_size:
-            self.tt.popitem(last=False)
-
-        self.tt[zobrist] = TTEntry(
-            depth=depth, score=score, flag=flag, best_move=best_move
-        )
-
-    @staticmethod
-    def _tt_score(entry: TTEntry, alpha: float, beta: float) -> Optional[float]:
-        if entry.flag == TTFlag.EXACT:
-            return entry.score
-        if entry.flag == TTFlag.ALPHA and entry.score <= alpha:
-            return entry.score
-        if entry.flag == TTFlag.BETA and entry.score >= beta:
-            return entry.score
-        return None
-
-    @staticmethod
-    def _tt_pv(entry: TTEntry, board: chess.Board) -> list[chess.Move]:
-        if entry.best_move is not None and entry.best_move in board.legal_moves:
-            return [entry.best_move]
-        return []
+        return sorted_scored_scores
 
     @staticmethod
     def _game_over_score(board: chess.Board) -> float:
         if board.is_checkmate():
-            return -1.0
+            return -1 if board.turn else 1
         return 0.0
