@@ -40,7 +40,7 @@ def build_model(
     model = create_model(model_type, model_config, device)
     if compile_model:
         model = torch.compile(model)  # type: ignore[assignment]
-    return model
+    return model  # type: ignore[return-value]
 
 
 def save_checkpoint(
@@ -101,17 +101,18 @@ def train_epoch(
     use_amp: bool,
     writer: Optional[SummaryWriter] = None,
     epoch: int = 0,
-) -> float:
+) -> dict[str, float]:
     model.train()
     total_loss = 0.0
     num_batches = 0
+    batch_losses: list[float] = []
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")  # type: ignore[attr-defined]
 
     optimizer.zero_grad()
     pbar = tqdm(
         loader,
         desc="Training",
-        leave=False,
+        leave=True,
         dynamic_ncols=True,
         unit="batch",
     )
@@ -138,6 +139,7 @@ def train_epoch(
         loss_val = loss.item() * grad_accum
         total_loss += loss_val
         num_batches += 1
+        batch_losses.append(loss_val)
 
         if writer and num_batches % max(1, len(loader) // 50) == 0:
             writer.add_scalar("Loss/train_step", loss_val, global_step + batch_idx)
@@ -149,7 +151,13 @@ def train_epoch(
         scaler.update()
         optimizer.zero_grad()
 
-    return total_loss / num_batches
+    losses_arr = np.array(batch_losses)
+    return {
+        "mean": total_loss / num_batches,
+        "std": float(losses_arr.std()),
+        "min": float(losses_arr.min()),
+        "max": float(losses_arr.max()),
+    }
 
 
 @torch.no_grad()
@@ -161,10 +169,11 @@ def validate(
     use_amp: bool,
     writer: Optional[SummaryWriter] = None,
     epoch: int = 0,
-) -> float:
+) -> dict[str, float]:
     model.eval()
     total_loss = 0.0
     num_batches = 0
+    batch_losses: list[float] = []
 
     all_targets = []
     all_outputs = []
@@ -172,7 +181,7 @@ def validate(
     pbar = tqdm(
         loader,
         desc="Validating",
-        leave=False,
+        leave=True,
         dynamic_ncols=True,
         unit="batch",
     )
@@ -192,6 +201,7 @@ def validate(
 
         total_loss += loss.item()
         num_batches += 1
+        batch_losses.append(loss.item())
         pbar.set_postfix({"loss": f"{total_loss / num_batches:.4f}"})
 
     if writer and len(all_targets) > 0:
@@ -202,26 +212,33 @@ def validate(
         writer.add_scalar("DistributionStats/outputs_mean", outputs_np.mean(), epoch)
         writer.add_scalar("DistributionStats/outputs_std", outputs_np.std(), epoch)
 
-    return total_loss / num_batches if num_batches > 0 else float("inf")
+    losses_arr = np.array(batch_losses)
+    return {
+        "mean": total_loss / num_batches if num_batches > 0 else float("inf"),
+        "std": float(losses_arr.std()) if len(losses_arr) > 0 else 0.0,
+        "min": float(losses_arr.min()) if len(losses_arr) > 0 else 0.0,
+        "max": float(losses_arr.max()) if len(losses_arr) > 0 else 0.0,
+    }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train NeuralChess model")
-    parser.add_argument("--model-type", type=str, default="cnn")
+    parser.add_argument("--model-type", type=str, required=True)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--data-dir", type=str, default="data/bitboard/")
+    parser.add_argument("--data-dir", type=str, required=True)
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/")
+    parser.add_argument("--checkpoint-name", type=str, default="best.pt")
     parser.add_argument("--val-split", type=float, default=0.2)
-    parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--resume", type=str, default=None)
     parser.add_argument(
         "--no-tensorboard", action="store_true", help="Disable TensorBoard logging"
     )
@@ -262,9 +279,16 @@ def main() -> None:
     start_epoch = 0
     best_val_loss = float("inf")
     model_type = args.model_type
+    checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint_name)
+
+    if os.path.isfile(checkpoint_path):
+        if not args.resume:
+            print(f"WARNING: checkpoint {checkpoint_path} already exists")
+            exit(1)
 
     if args.resume:
-        print(f"Resuming from {args.resume}")
+        resume_path = os.path.join(args.checkpoint_dir, args.resume)
+        print(f"Resuming from {resume_path}")
         (
             model_state,
             optimizer_state,
@@ -273,7 +297,7 @@ def main() -> None:
             best_val_loss,
             model_type,
             model_config,
-        ) = load_checkpoint(args.resume, device)
+        ) = load_checkpoint(str(resume_path), device)
         model = build_model(model_type, model_config, device, args.compile)
         model.load_state_dict(model_state)
         start_epoch += 1
@@ -297,16 +321,8 @@ def main() -> None:
         writer = SummaryWriter(log_dir=log_dir)
         print(f"TensorBoard logging to: {log_dir}")
 
-    checkpoint_path = os.path.join(args.checkpoint_dir, "best.pt")
-
-    epoch_pbar = tqdm(
-        range(start_epoch, args.epochs),
-        desc="Training",
-        dynamic_ncols=True,
-        unit="epoch",
-    )
-    for epoch in epoch_pbar:
-        train_loss = train_epoch(
+    for epoch in range(start_epoch, args.epochs):
+        train_metrics = train_epoch(
             model,
             train_loader,
             optimizer,
@@ -317,36 +333,57 @@ def main() -> None:
             writer=writer,
             epoch=epoch,
         )
-        val_loss = validate(
+        val_metrics = validate(
             model, val_loader, criterion, device, args.amp, writer=writer, epoch=epoch
         )
-        scheduler.step(val_loss)
+        scheduler.step(val_metrics["mean"])
 
         current_lr = optimizer.param_groups[0]["lr"]
         if writer:
-            writer.add_scalar("Loss/train_epoch", train_loss, epoch)
-            writer.add_scalar("Loss/val_epoch", val_loss, epoch)
+            writer.add_scalar("Loss/train_epoch", train_metrics["mean"], epoch)
+            writer.add_scalar("Loss/val_epoch", val_metrics["mean"], epoch)
             writer.add_scalar("LR", current_lr, epoch)
 
-        epoch_pbar.set_postfix(
-            {
-                "train_loss": f"{train_loss:.4f}",
-                "val_loss": f"{val_loss:.4f}",
-                "lr": f"{current_lr:.6f}",
-            }
+        train_cv = (
+            train_metrics["std"] / train_metrics["mean"]
+            if train_metrics["mean"] != 0
+            else 0.0
         )
+        val_cv = (
+            val_metrics["std"] / val_metrics["mean"]
+            if val_metrics["mean"] != 0
+            else 0.0
+        )
+        train_range = train_metrics["max"] - train_metrics["min"]
+        val_range = val_metrics["max"] - val_metrics["min"]
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        print(f"\n{'=' * 60}")
+        print(f"Epoch {epoch}/{args.epochs - 1}")
+        print(f"{'=' * 60}")
+        print(
+            f"  Train Loss: {train_metrics['mean']:.4f} ± {train_metrics['std']:.4f}  (range: {train_metrics['min']:.4f} → {train_metrics['max']:.4f})"
+        )
+        print(
+            f"  Val Loss:   {val_metrics['mean']:.4f} ± {val_metrics['std']:.4f}  (range: {val_metrics['min']:.4f} → {val_metrics['max']:.4f})"
+        )
+        print(f"  LR:         {current_lr:.6f}")
+        print(f"{'─' * 60}")
+        print(f"  Stability:")
+        print(f"    Train CV:  {train_cv:.4f}  |  Range: {train_range:.4f}")
+        print(f"    Val CV:    {val_cv:.4f}  |  Range: {val_range:.4f}")
+        print(f"{'=' * 60}")
+
+        if val_metrics["mean"] < best_val_loss:
+            best_val_loss = val_metrics["mean"]
             save_checkpoint(
-                checkpoint_path,
+                str(checkpoint_path),
                 epoch,
                 model,
                 optimizer,
                 scheduler,
                 best_val_loss,
             )
-            print(f"  Saved best checkpoint (val_loss={val_loss:.4f})")
+            print(f"  ✓ Saved best checkpoint (val_loss={best_val_loss:.4f})")
 
     if writer:
         writer.close()
@@ -356,3 +393,76 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# --- Modal Integration ---
+try:
+    import modal
+except ImportError:
+    modal = None
+
+# Only define Modal objects if the modal package is installed
+if modal is not None:
+    app = modal.App("neuralchess-trainer")
+
+    # 1. Define the Environment Image
+    # Installs dependencies from your local pyproject.toml and adds the local
+    # neuralchess package source.
+    image = (
+        modal.Image.debian_slim()
+        .pip_install_from_pyproject("pyproject.toml")
+        .add_local_python_source("neuralchess")
+    )
+
+    # 2. Mount the Persistent Volume
+    volume = modal.Volume.from_name("neuralchess-data", create_if_missing=True)
+
+    # 3. Define the Remote Execution Function
+    @app.function(
+        image=image,
+        volumes={"/vol": volume},
+        gpu="T4",  # Automatically acquires an available GPU
+        timeout=86400,  # 24 hour timeout for training
+    )
+    def modal_main(*args):
+        import sys
+        import threading
+        import time
+
+        # Intercept and override sys.argv so your existing argparse logic
+        # inside main() works perfectly without modification.
+        sys.argv = ["train.py"] + list(args)
+
+        # Continuously sync logs to the cloud every 60 seconds
+        stop_event = threading.Event()
+
+        def background_commit():
+            while not stop_event.is_set():
+                time.sleep(60)
+                if stop_event.is_set():
+                    break
+                try:
+                    volume.commit()
+                except Exception as e:
+                    print(f"Background volume commit failed: {e}")
+
+        committer = threading.Thread(target=background_commit, daemon=True)
+        committer.start()
+
+        try:
+            # Run your existing logic!
+            main()
+        finally:
+            stop_event.set()
+            # Ensure all data (checkpoints, logs) written to /vol is persisted
+            volume.commit()
+
+    # 4. Define the Local CLI Entrypoint for Modal
+    @app.local_entrypoint()
+    def run_modal(*args):
+        """
+        Invoked via: modal run src/neuralchess/train.py -- --arg1 val1
+        """
+        print(f"🚀 Launching NeuralChess Training on Modal GPU...")
+        print(f"Arguments forwarded: {args}")
+        # Forward the arbitrary CLI arguments to the remote function
+        modal_main.remote(*args)
