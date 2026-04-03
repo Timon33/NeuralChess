@@ -39,7 +39,7 @@ def build_model(
 ) -> ChessModel:
     model = create_model(model_type, model_config, device)
     if compile_model:
-        model = torch.compile(model)  # type: ignore[assignment]
+        model = torch.compile(model, mode="max-autotune")  # type: ignore[assignment]
     return model  # type: ignore[return-value]
 
 
@@ -118,9 +118,13 @@ def train_epoch(
     )
 
     global_step = epoch * len(loader)
+    use_channels_last = device.type == "cuda"
+    log_interval = max(1, len(loader) // 50)
 
     for batch_idx, (inputs, targets) in enumerate(pbar):
         inputs = inputs.to(device, non_blocking=True)
+        if use_channels_last and inputs.ndim == 4:
+            inputs = inputs.contiguous(memory_format=torch.channels_last)
         targets = targets.to(device, non_blocking=True).unsqueeze(1)
 
         with torch.autocast(
@@ -136,27 +140,27 @@ def train_epoch(
             scaler.update()
             optimizer.zero_grad()
 
-        loss_val = loss.item() * grad_accum
-        total_loss += loss_val
-        num_batches += 1
-        batch_losses.append(loss_val)
-
-        if writer and num_batches % max(1, len(loader) // 50) == 0:
+        if writer and num_batches % log_interval == 0:
+            loss_val = loss.item() * grad_accum
             writer.add_scalar("Loss/train_step", loss_val, global_step + batch_idx)
 
-        pbar.set_postfix({"loss": f"{total_loss / num_batches:.4f}"})
+        total_loss += loss.item() * grad_accum
+        num_batches += 1
+
+        if num_batches % 10 == 0:
+            pbar.set_postfix({"loss": f"{total_loss / num_batches:.4f}"})
 
     if num_batches % grad_accum != 0:
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
 
-    losses_arr = np.array(batch_losses)
+    losses_arr = np.array([total_loss / num_batches])
     return {
         "mean": total_loss / num_batches,
         "std": float(losses_arr.std()),
-        "min": float(losses_arr.min()),
-        "max": float(losses_arr.max()),
+        "min": total_loss / num_batches,
+        "max": total_loss / num_batches,
     }
 
 
@@ -185,8 +189,11 @@ def validate(
         dynamic_ncols=True,
         unit="batch",
     )
+    use_channels_last = device.type == "cuda"
     for inputs, targets in pbar:
         inputs = inputs.to(device, non_blocking=True)
+        if use_channels_last and inputs.ndim == 4:
+            inputs = inputs.contiguous(memory_format=torch.channels_last)
         targets = targets.to(device, non_blocking=True).unsqueeze(1)
 
         with torch.autocast(
@@ -225,7 +232,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train NeuralChess model")
     parser.add_argument("--model-type", type=str, required=True)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--data-dir", type=str, required=True)
@@ -236,6 +243,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--in-memory", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--resume", type=str, default=None)
@@ -252,27 +260,33 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    dataset = ChessDataset(args.data_dir, max_positions=args.max_samples)
+    dataset = ChessDataset(
+        args.data_dir, max_positions=args.max_samples, in_memory=args.in_memory
+    )
     print(f"Data loaded. Dataset size: {len(dataset)}")
     val_size = int(len(dataset) * args.val_split)
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
+    num_workers = 0 if args.in_memory else args.num_workers
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         pin_memory=True if device.type == "cuda" else False,
-        prefetch_factor=2 if args.num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         pin_memory=True if device.type == "cuda" else False,
-        prefetch_factor=2 if args.num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     model_config: dict = {}
@@ -282,9 +296,8 @@ def main() -> None:
     checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint_name)
 
     if os.path.isfile(checkpoint_path):
-        if not args.resume:
-            print(f"WARNING: checkpoint {checkpoint_path} already exists")
-            exit(1)
+        print(f"WARNING: checkpoint {checkpoint_path} already exists")
+
 
     if args.resume:
         resume_path = os.path.join(args.checkpoint_dir, args.resume)
@@ -304,6 +317,14 @@ def main() -> None:
     else:
         model = build_model(model_type, model_config, device, args.compile)
 
+    if device.type == "cuda":
+
+        def _to_channels_last(m):
+            if hasattr(m, "to") and hasattr(m, "weight") and hasattr(m.weight, "data"):
+                m.to(memory_format=torch.channels_last)  # type: ignore[call-arg]
+
+        model.apply(_to_channels_last)
+
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model type: {model_type} | Parameters: {param_count:,}")
 
@@ -317,7 +338,12 @@ def main() -> None:
 
     writer = None
     if not args.no_tensorboard:
-        log_dir = os.path.join(args.checkpoint_dir, "tensorboard")
+        import datetime
+
+        run_name = (
+            datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + f"_{args.model_type}"
+        )
+        log_dir = os.path.join(args.checkpoint_dir, "tensorboard", run_name)
         writer = SummaryWriter(log_dir=log_dir)
         print(f"TensorBoard logging to: {log_dir}")
 
