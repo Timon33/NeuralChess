@@ -21,16 +21,20 @@ from neuralchess.models.base import ChessModel, ModelConfig
 
 
 class ResidualBlock(nn.Module):
+    """Residual block with batch normalization for stable training."""
+
     def __init__(self, channels: int) -> None:
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
         self.relu = nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
-        out = self.relu(self.conv1(x))
-        out = self.conv2(out)
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
         out = out + identity
         return self.relu(out)
 
@@ -39,10 +43,10 @@ class ResidualBlock(nn.Module):
 class CNNConfig(ModelConfig):
     encoder_name: str = "bitboard"
     input_channels: int = 14
-    entry_channels: int = 32
-    residual_channels: int = 32
-    residual_blocks: int = 2
-    fc_hidden: tuple[int, ...] = (256,)
+    entry_channels: int = 128
+    residual_channels: int = 128
+    residual_blocks: int = 10
+    fc_hidden: tuple[int, ...] = (512, 256)
     kernel_size: int = 3
 
 
@@ -59,7 +63,9 @@ class NeuralChessNet(ChessModel):
                 self._config.entry_channels,
                 kernel_size=self._config.kernel_size,
                 padding=self._config.kernel_size // 2,
+                bias=False,
             ),
+            nn.BatchNorm2d(self._config.entry_channels),
             nn.ReLU(),
         ]
         self.entry = nn.Sequential(*entry_layers)
