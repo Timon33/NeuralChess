@@ -17,7 +17,10 @@ def parse_eval(raw: str | int | float) -> float:
     return float(raw)
 
 
-def scale_eval(cp: float) -> float:
+def scale_eval(cp: float, inverse: bool = False) -> float:
     import torch
 
+    if inverse:
+        val = max(min(cp, 0.999999), -0.999999)
+        return float(torch.atanh(torch.tensor(val)) * 600.0)
     return float(torch.tanh(torch.tensor(cp / 600.0)))

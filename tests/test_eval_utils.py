@@ -42,3 +42,24 @@ class TestScaleEval:
 
     def test_symmetry(self) -> None:
         assert abs(scale_eval(100.0) + scale_eval(-100.0)) < 1e-6
+
+    def test_inverse_identity(self) -> None:
+        cp = 350.0
+        scaled = scale_eval(cp)
+        result = scale_eval(scaled, inverse=True)
+        assert abs(result - cp) < 1e-4
+
+    def test_inverse_zero(self) -> None:
+        assert scale_eval(0.0, inverse=True) == 0.0
+
+    def test_inverse_clamping(self) -> None:
+        result = scale_eval(1.0, inverse=True)
+        assert result > 0
+        result = scale_eval(-1.0, inverse=True)
+        assert result < 0
+
+    def test_inverse_symmetry(self) -> None:
+        scaled = scale_eval(200.0)
+        assert abs(scale_eval(scaled, inverse=True) - 200.0) < 1e-4
+        scaled_neg = scale_eval(-200.0)
+        assert abs(scale_eval(scaled_neg, inverse=True) - (-200.0)) < 1e-4

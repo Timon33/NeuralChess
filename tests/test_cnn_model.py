@@ -27,7 +27,7 @@ def test_cnn_param_count() -> None:
 
 
 def test_cnn_custom_config() -> None:
-    config = CNNConfig(conv_channels=(32, 64), fc_hidden=(128,))
+    config = CNNConfig(residual_channels=64, residual_blocks=2, fc_hidden=(128,))
     model = NeuralChessNet(config)
     batch = torch.randn(4, *model.expected_input_shape)
     output = model(batch)
