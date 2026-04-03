@@ -2,16 +2,17 @@
 Model registry and factory functions for NeuralChess.
 """
 
-from dataclasses import asdict
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
 from neuralchess.models.base import ChessModel, ModelConfig
 from neuralchess.models.cnn import CNNConfig, NeuralChessNet
+from neuralchess.models.transformer import TransformerChessNet, TransformerConfig
 
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {
     "cnn": {"cls": NeuralChessNet, "config_cls": CNNConfig},
+    "transformer": {"cls": TransformerChessNet, "config_cls": TransformerConfig},
 }
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "ModelConfig",
     "NeuralChessNet",
     "CNNConfig",
+    "TransformerChessNet",
+    "TransformerConfig",
     "MODEL_REGISTRY",
     "create_model",
     "load_model",
