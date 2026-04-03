@@ -34,6 +34,7 @@ MATE_PATTERN = re.compile(r"^#([+-]?)(\d+)$")
 
 SAMPLE_SIZE = 5
 
+
 def parse_eval(raw: str | int | float) -> float:
     """
     convert centipawns stockfish evaluation to win prop
@@ -358,3 +359,57 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# --- Modal Integration ---
+try:
+    import modal
+except ImportError:
+    modal = None
+
+# Only define Modal objects if the modal package is installed
+if modal is not None:
+    app = modal.App("neuralchess-data-downloader")
+
+    # 1. Define the Environment Image
+    # Installs dependencies from your local pyproject.toml, adds the local
+    # neuralchess package source, and ensures the Kaggle CLI is present.
+    image = (
+        modal.Image.debian_slim()
+        .pip_install("kaggle")
+        .pip_install_from_pyproject("pyproject.toml")
+        .add_local_python_source("neuralchess")
+    )
+
+    # 2. Mount the Persistent Volume
+    volume = modal.Volume.from_name("neuralchess-data", create_if_missing=True)
+
+    # 3. Define the Remote Execution Function
+    @app.function(
+        image=image,
+        volumes={"/vol": volume},
+        secrets=[modal.Secret.from_name("kaggle-creds")],
+        timeout=86400,  # 24 hour timeout for processing large datasets
+    )
+    def modal_main(*args):
+        import sys
+
+        # Intercept and override sys.argv so your existing argparse logic
+        # inside main() works perfectly without modification.
+        sys.argv = ["download_data.py"] + list(args)
+
+        # Run your existing logic!
+        main()
+
+        # Ensure all data written to /vol is persisted
+        volume.commit()
+
+    # 4. Define the Local CLI Entrypoint for Modal
+    @app.local_entrypoint()
+    def run_modal(*args):
+        """
+        Invoked via: modal run src/neuralchess/download_data.py -- --arg1 val1
+        """
+        print(f"Launching Kaggle download on Modal GPU cluster...")
+        print(f"Arguments forwarded: {args}")
+        # Forward the arbitrary CLI arguments to the remote function
+        modal_main.remote(*args)
