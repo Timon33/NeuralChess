@@ -40,7 +40,7 @@ _FEN_BOARD_RE = re.compile(r"^([1-8kqrbnpKQRBNP/]+)\s+([wb])\s+([KQkq-]+)\s")
 
 
 class BitboardEncoder(PositionEncoder):
-    def encode(self, fen: str) -> torch.Tensor:
+    def encode_position(self, fen: str) -> torch.Tensor:
         parts = fen.split()
         board_str = parts[0]
         turn = parts[1]
@@ -72,41 +72,4 @@ class BitboardEncoder(PositionEncoder):
 
     @property
     def output_shape(self) -> tuple[int, ...]:
-        return (14, 8, 8)
-
-    @property
-    def name(self) -> str:
-        return "bitboard"
-
-    def encode_batch(self, fens: list[str]) -> np.ndarray:
-        n = len(fens)
-        out = np.zeros((n, 14, 8, 8), dtype=np.float32)
-
-        for i, fen in enumerate(fens):
-            m = _FEN_BOARD_RE.search(fen)
-            if not m:
-                raise ValueError(f"Invalid FEN: {fen}")
-            board_str, turn, castling = m.group(1), m.group(2), m.group(3)
-
-            row = 0
-            col = 0
-            for char in board_str:
-                if char == "/":
-                    row += 1
-                    col = 0
-                elif char.isdigit():
-                    col += int(char)
-                else:
-                    channel = PIECE_TO_CHANNEL[char]
-                    out[i, channel, row, col] = 1.0
-                    col += 1
-
-            if turn == "w":
-                out[i, 12, :, :] = 1.0
-
-            for castle_char in castling:
-                if castle_char in CASTLING_SQUARES:
-                    for sq in CASTLING_SQUARES[castle_char]:
-                        out[i, 13, sq // 8, sq % 8] = 1.0
-
-        return out
+        return 14, 8, 8

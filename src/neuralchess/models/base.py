@@ -23,11 +23,11 @@ class ChessModel(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
 
     def evaluate(self, fens: list[str]) -> list[float]:
-        """Batched evaluation: list of FEN strings to list of scores.
-
-        Models handle their own encoding internally.
-        """
-        raise NotImplementedError
+        tensors = self._encoder.encode_batch(fens)
+        batch = torch.from_numpy(tensors).to(self._device)
+        with torch.no_grad():
+            scores = self(batch).squeeze(-1).tolist()
+        return scores
 
     @classmethod
     def from_checkpoint(

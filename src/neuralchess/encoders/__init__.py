@@ -1,8 +1,10 @@
 from neuralchess.encoders.base import PositionEncoder
 from neuralchess.encoders.bitboard import BitboardEncoder
+from neuralchess.encoders.tokenizer import TokenEncoder
 
 ENCODER_REGISTRY: dict[str, type[PositionEncoder]] = {
     "bitboard": BitboardEncoder,
+    "tokenizer": TokenEncoder,
 }
 
 

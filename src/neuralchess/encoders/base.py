@@ -10,15 +10,11 @@ import torch
 
 class PositionEncoder(ABC):
     @abstractmethod
-    def encode(self, fen: str) -> torch.Tensor: ...
+    def encode_position(self, fen: str) -> torch.Tensor: ...
 
     def encode_batch(self, fens: list[str]) -> np.ndarray:
-        return np.stack([self.encode(fen).numpy() for fen in fens])
+        return np.stack([self.encode_position(fen).numpy() for fen in fens])
 
     @property
     @abstractmethod
     def output_shape(self) -> tuple[int, ...]: ...
-
-    @property
-    @abstractmethod
-    def name(self) -> str: ...

@@ -98,13 +98,6 @@ class NeuralChessNet(ChessModel):
         x = self.gap(x).squeeze(-1).squeeze(-1)
         return torch.tanh(self.fc(x))
 
-    def evaluate(self, fens: list[str]) -> list[float]:
-        tensors = self._encoder.encode_batch(fens)
-        batch = torch.from_numpy(tensors).to(self._device)
-        with torch.no_grad():
-            scores = self(batch).squeeze(-1).tolist()
-        return scores
-
     @classmethod
     def from_checkpoint(
         cls, checkpoint_path: str, device: torch.device
@@ -129,7 +122,3 @@ class NeuralChessNet(ChessModel):
     @property
     def expected_input_shape(self) -> tuple[int, ...]:
         return self._encoder.output_shape
-
-    def to(self, device: torch.device) -> ChessModel:
-        self._device = device
-        return super().to(device)
