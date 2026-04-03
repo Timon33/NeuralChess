@@ -40,6 +40,7 @@ image = (
         "numpy>=2.0.0",
         "tqdm>=4.67.3",
         "kaggle>=1.6.0",
+        "tensorboard>=2.14.0",
     )
     .env({"KAGGLE_CONFIG_DIR": "/root/.kaggle"})
     .add_local_dir(PROJECT_ROOT / "src", remote_path="/root/src")
@@ -61,7 +62,6 @@ def _setup_paths() -> None:
 @app.function(
     volumes={VOLUME_MOUNT: volume},
     secrets=[kaggle_secret],
-    timeout=7200,
 )
 def preprocess(
     max_rows: int | None = None,
@@ -101,7 +101,7 @@ def preprocess(
     gpu="T4",
     volumes={VOLUME_MOUNT: volume},
     secrets=[kaggle_secret],
-    timeout=14400,
+    timeout=24*60*60,
 )
 def train(
     epochs: int = 20,
@@ -132,6 +132,7 @@ def train(
     import torch
     from torch import nn
     from torch.utils.data import DataLoader, random_split
+    from torch.utils.tensorboard import SummaryWriter
 
     seed_everything(seed)
 
@@ -192,6 +193,10 @@ def train(
     )
     criterion = nn.MSELoss()
 
+    tb_log_dir = os.path.join(CHECKPOINT_DIR, "tensorboard")
+    writer = SummaryWriter(log_dir=tb_log_dir)
+    print(f"TensorBoard logging to: {tb_log_dir}")
+
     history = {"train_loss": [], "val_loss": [], "lr": []}
 
     for epoch in range(start_epoch, epochs):
@@ -203,8 +208,12 @@ def train(
             device,
             grad_accum_steps,
             amp,
+            writer=writer,
+            epoch=epoch,
         )
-        val_loss = validate(model, val_loader, criterion, device, amp)
+        val_loss = validate(
+            model, val_loader, criterion, device, amp, writer=writer, epoch=epoch
+        )
         scheduler.step(val_loss)
 
         current_lr = optimizer.param_groups[0]["lr"]
@@ -214,6 +223,11 @@ def train(
             f"val_loss={val_loss:.4f} | "
             f"lr={current_lr:.6f}"
         )
+
+        if writer:
+            writer.add_scalar("Loss/train_epoch", train_loss, epoch)
+            writer.add_scalar("Loss/val_epoch", val_loss, epoch)
+            writer.add_scalar("LR", current_lr, epoch)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
@@ -234,6 +248,7 @@ def train(
             )
             print(f"  Saved best checkpoint (val_loss={val_loss:.4f})")
 
+    writer.close()
     volume.commit()
 
     return {
@@ -250,7 +265,7 @@ def train(
     gpu="T4",
     volumes={VOLUME_MOUNT: volume},
     secrets=[kaggle_secret],
-    timeout=14400,
+    timeout=24*60*60,
 )
 def train_and_preprocess(
     max_rows: int | None = None,

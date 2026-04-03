@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, random_split
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -112,6 +113,8 @@ def train_epoch(
     device: torch.device,
     grad_accum: int,
     use_amp: bool,
+    writer: Optional[SummaryWriter] = None,
+    epoch: int = 0,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -126,6 +129,9 @@ def train_epoch(
         dynamic_ncols=True,
         unit="batch",
     )
+
+    global_step = epoch * len(loader)
+
     for batch_idx, (inputs, targets) in enumerate(pbar):
         inputs = inputs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True).unsqueeze(1)
@@ -143,8 +149,13 @@ def train_epoch(
             scaler.update()
             optimizer.zero_grad()
 
-        total_loss += loss.item() * grad_accum
+        loss_val = loss.item() * grad_accum
+        total_loss += loss_val
         num_batches += 1
+
+        if writer and num_batches % max(1, len(loader) // 50) == 0:
+            writer.add_scalar("Loss/train_step", loss_val, global_step + batch_idx)
+
         pbar.set_postfix({"loss": f"{total_loss / num_batches:.4f}"})
 
     if num_batches % grad_accum != 0:
@@ -162,10 +173,15 @@ def validate(
     criterion: nn.Module,
     device: torch.device,
     use_amp: bool,
+    writer: Optional[SummaryWriter] = None,
+    epoch: int = 0,
 ) -> float:
     model.eval()
     total_loss = 0.0
     num_batches = 0
+
+    all_targets = []
+    all_outputs = []
 
     pbar = tqdm(
         loader,
@@ -184,9 +200,21 @@ def validate(
             outputs = model(inputs)
             loss = criterion(outputs, targets)
 
+        if writer and num_batches == 0:
+            all_targets.append(targets.cpu().numpy())
+            all_outputs.append(outputs.cpu().numpy())
+
         total_loss += loss.item()
         num_batches += 1
         pbar.set_postfix({"loss": f"{total_loss / num_batches:.4f}"})
+
+    if writer and len(all_targets) > 0:
+        targets_np = np.concatenate(all_targets).flatten()
+        outputs_np = np.concatenate(all_outputs).flatten()
+        writer.add_histogram("Distribution/targets", targets_np, epoch)
+        writer.add_histogram("Distribution/outputs", outputs_np, epoch)
+        writer.add_scalar("DistributionStats/outputs_mean", outputs_np.mean(), epoch)
+        writer.add_scalar("DistributionStats/outputs_std", outputs_np.std(), epoch)
 
     return total_loss / num_batches if num_batches > 0 else float("inf")
 
@@ -208,6 +236,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument(
+        "--no-tensorboard", action="store_true", help="Disable TensorBoard logging"
+    )
     return parser.parse_args()
 
 
@@ -273,6 +304,12 @@ def main() -> None:
     )
     criterion = nn.MSELoss()
 
+    writer = None
+    if not args.no_tensorboard:
+        log_dir = os.path.join(args.checkpoint_dir, "tensorboard")
+        writer = SummaryWriter(log_dir=log_dir)
+        print(f"TensorBoard logging to: {log_dir}")
+
     checkpoint_path = os.path.join(args.checkpoint_dir, "best.pt")
 
     epoch_pbar = tqdm(
@@ -290,11 +327,20 @@ def main() -> None:
             device,
             args.grad_accum_steps,
             args.amp,
+            writer=writer,
+            epoch=epoch,
         )
-        val_loss = validate(model, val_loader, criterion, device, args.amp)
+        val_loss = validate(
+            model, val_loader, criterion, device, args.amp, writer=writer, epoch=epoch
+        )
         scheduler.step(val_loss)
 
         current_lr = optimizer.param_groups[0]["lr"]
+        if writer:
+            writer.add_scalar("Loss/train_epoch", train_loss, epoch)
+            writer.add_scalar("Loss/val_epoch", val_loss, epoch)
+            writer.add_scalar("LR", current_lr, epoch)
+
         epoch_pbar.set_postfix(
             {
                 "train_loss": f"{train_loss:.4f}",
@@ -316,6 +362,9 @@ def main() -> None:
                 model_config,
             )
             print(f"  Saved best checkpoint (val_loss={val_loss:.4f})")
+
+    if writer:
+        writer.close()
 
     print(f"Training complete. Best val loss: {best_val_loss:.4f}")
 

@@ -11,15 +11,19 @@ dependencies = [
     "tqdm>=4.67.3",
     "ipykernel>=7.2.0",
     "matplotlib>=3.10.8",
+    "modal>=1.4.1",
+    "tensorboard>=2.20.0",
 ]
 
 [project.scripts]
 neuralchess-play = "neuralchess.play:main"
 neuralchess-uci = "neuralchess.uci:main"
+neuralchess-benchmark = "scripts.benchmark:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    "modal>=1.0.0",
 ]
 
 [build-system]

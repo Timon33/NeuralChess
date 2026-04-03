@@ -71,6 +71,56 @@ Encoders convert FEN strings to tensors. Each encoder has a `name` and `output_s
 6. **CPU-compatible** — the engine must work on CPU even if trained on GPU
 7. **Architecture-agnostic core** — new architectures should only add files in `encoders/` and `models/` without modifying `core/`
 
+## Cloud Training (Modal)
+
+NeuralChess supports cloud GPU training via Modal. Local workflows remain unchanged.
+
+### Setup (one-time)
+
+```bash
+# Install modal CLI
+pip install modal
+
+# Authenticate
+modal setup
+
+# Create Kaggle API secret
+modal secret create kaggle-creds KAGGLE_API_TOKEN=<your-token>
+
+# Create persistent volume for data and checkpoints
+modal volume create neuralchess-data
+```
+
+### Commands
+
+```bash
+# Preprocess data
+modal run modal_app.py --action preprocess --max-rows 100000
+
+# Train on cloud GPU (loads preprocessed data from volume)
+modal run modal_app.py --action train --epochs 20 --batch-size 4096
+
+# Preprocess + train in one run
+modal run modal_app.py --action all --epochs 20
+
+# Save checkpoint with custom name
+modal run modal_app.py --action train --checkpoint-name best_20epochs.pt
+
+# Download trained checkpoint from Modal volume to local
+modal volume get neuralchess-data checkpoints/best.pt ./checkpoints/best.pt
+
+# List files in Modal volume
+modal volume ls neuralchess-data
+```
+
+### Data Handling
+
+- **Modal Volume** (`neuralchess-data`) persists data and checkpoints across runs
+- Preprocessed `.npy` files are stored at `data/bitboard/` in the volume
+- Checkpoints are stored at `checkpoints/` in the volume
+- Training auto-resumes from existing checkpoint if found
+- Download checkpoints locally with `modal volume get` to use with `play.py` or `uci.py`
+- 
 ## Commands
 
 ```bash
