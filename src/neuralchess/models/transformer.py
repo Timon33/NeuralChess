@@ -56,7 +56,7 @@ class TransformerChessNet(ChessModel):
         x = self.token_emb(x.long()) + self.pos_emb(positions)
         x = self.transformer(x)
         x = x.mean(dim=1)
-        return torch.tanh(self.head(x))
+        return torch.sigmoid(self.head(x))
 
     @classmethod
     def from_checkpoint(
