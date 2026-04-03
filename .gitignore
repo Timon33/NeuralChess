@@ -88,3 +88,11 @@ checkpoints/
 *.pt
 *.pth
 *.onnx
+
+analysis/
+games.pgn
+results.json
+
+*.pdf
+*.log
+*.ipynb
