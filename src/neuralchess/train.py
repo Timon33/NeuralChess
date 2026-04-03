@@ -9,8 +9,7 @@ Architecture-agnostic checkpoint format.
 import argparse
 import os
 import random
-import sys
-from pathlib import Path
+from dataclasses import asdict
 from typing import Any, Optional
 
 import numpy as np
@@ -20,14 +19,8 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 from neuralchess.core.dataset import ChessDataset
-from neuralchess.models import CNNConfig, NeuralChessNet
-
-MODEL_REGISTRY: dict[str, Any] = {
-    "cnn": {"cls": NeuralChessNet, "config_cls": CNNConfig},
-}
+from neuralchess.models import MODEL_REGISTRY, ChessModel, create_model
 
 
 def seed_everything(seed: int) -> None:
@@ -43,16 +36,8 @@ def build_model(
     model_config: dict,
     device: torch.device,
     compile_model: bool,
-) -> nn.Module:
-    if model_type not in MODEL_REGISTRY:
-        raise ValueError(
-            f"Unknown model type: {model_type}. Available: {list(MODEL_REGISTRY.keys())}"
-        )
-    entry = MODEL_REGISTRY[model_type]
-    config_cls = entry["config_cls"]
-    model_cls: type[nn.Module] = entry["cls"]
-    config = config_cls(**model_config) if model_config else config_cls()
-    model: nn.Module = model_cls(config).to(device)
+) -> ChessModel:
+    model = create_model(model_type, model_config, device)
     if compile_model:
         model = torch.compile(model)  # type: ignore[assignment]
     return model
@@ -61,14 +46,13 @@ def build_model(
 def save_checkpoint(
     path: str,
     epoch: int,
-    model: nn.Module,
+    model: ChessModel,
     optimizer: torch.optim.Optimizer,
     scheduler: Optional[torch.optim.lr_scheduler.ReduceLROnPlateau],
     best_val_loss: float,
-    model_type: str,
-    model_config: dict,
 ) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    model_type = model.config.__class__.__name__.replace("Config", "").lower()
     state = {
         "epoch": epoch,
         "model_state": model.state_dict(),
@@ -76,7 +60,9 @@ def save_checkpoint(
         "scheduler_state": scheduler.state_dict() if scheduler else None,
         "best_val_loss": best_val_loss,
         "model_type": model_type,
-        "model_config": model_config,
+        "model_config": {
+            k: v for k, v in asdict(model.config).items() if not k.startswith("_")
+        },
     }
     torch.save(state, path)
 
@@ -358,8 +344,6 @@ def main() -> None:
                 optimizer,
                 scheduler,
                 best_val_loss,
-                model_type,
-                model_config,
             )
             print(f"  Saved best checkpoint (val_loss={val_loss:.4f})")
 

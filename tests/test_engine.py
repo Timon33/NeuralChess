@@ -7,16 +7,18 @@ import pytest
 import torch
 
 from neuralchess.engine import NeuralEngine, TTFlag
+from neuralchess.models import NeuralChessNet
 
 
 @pytest.fixture
 def engine():
-    return NeuralEngine("checkpoints/test_model.pt", device=torch.device("cpu"))
+    model = NeuralChessNet()
+    model.eval()
+    return NeuralEngine(model=model, device=torch.device("cpu"))
 
 
 def test_engine_loads_checkpoint(engine):
     assert engine.model is not None
-    assert engine.encoder is not None
 
 
 def test_search_returns_move(engine):

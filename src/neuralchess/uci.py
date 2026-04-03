@@ -9,8 +9,10 @@ import threading
 from typing import Optional
 
 import chess
+import torch
 
 from neuralchess.engine import NeuralEngine
+from neuralchess.models import load_model
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +21,6 @@ class UCIHandler:
     def __init__(self, engine: NeuralEngine, debug: bool = False) -> None:
         self.engine = engine
         self.board = chess.Board()
-        self.movetime_ms: int = 1000
         self.debug = debug
 
         self.stop_event = threading.Event()
@@ -101,6 +102,8 @@ class UCIHandler:
             else:
                 i += 1
 
+        logger.debug(f"position set:\n{self.board.fen()}")
+
     def _handle_go(self, args: list[str]) -> None:
         self._handle_stop()
 
@@ -129,19 +132,15 @@ class UCIHandler:
             else:
                 i += 1
 
-        if (
-            movetime is None
-            and wtime is None
-            and btime is None
-            and "infinite" not in args
-        ):
-            movetime = self.movetime_ms
+        if movetime is not None:
+            time_limit_ms = movetime
+        elif wtime is not None and btime is not None:
+            remaining = wtime if self.board.turn == chess.WHITE else btime
+            time_limit_ms = max(remaining // 10, 100)
+        else:
+            time_limit_ms = None
 
-        time_limit_ms = None
-        if movetime is not None or wtime is not None or btime is not None:
-            time_limit_ms = self._calculate_time_limit(
-                self.board.turn, movetime, wtime, btime
-            )
+        time_limit_ms = 5000
 
         self.stop_event.clear()
         self.search_thread = threading.Thread(
@@ -159,32 +158,16 @@ class UCIHandler:
         logger.warning(f"staring search for {time_limit_ms}ms")
         self.search_thread.start()
 
-    def _calculate_time_limit(
-        self,
-        turn: bool,
-        movetime_ms: Optional[int] = None,
-        wtime_ms: Optional[int] = None,
-        btime_ms: Optional[int] = None,
-    ) -> int:
-        if movetime_ms is not None:
-            time_limit_ms = movetime_ms
-        elif wtime_ms is not None and btime_ms is not None:
-            remaining = wtime_ms if turn == chess.WHITE else btime_ms
-            time_limit_ms = remaining // 10
-        else:
-            time_limit_ms = 1000
-
-        return max(time_limit_ms, 10)
 
     def _search_worker(self, board: chess.Board, max_depth: int) -> None:
         best_move, score, pv = self.engine.search(
             board, max_depth=max_depth, stop_event=self.stop_event
         )
 
-        depth = len(pv)
         if best_move is not None:
             self._send(f"bestmove {best_move.uci()}")
         else:
+            logger.error(f"search failed")
             self._send("bestmove 0000")
 
     def _handle_stop(self) -> None:
@@ -232,7 +215,9 @@ def main() -> None:
         handlers=handlers,
     )
 
-    engine = NeuralEngine(args.checkpoint, debug=args.debug)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = load_model(args.checkpoint, device)
+    engine = NeuralEngine(model=model, device=device, debug=args.debug)
     handler = UCIHandler(engine, debug=args.debug)
     handler.loop()
 

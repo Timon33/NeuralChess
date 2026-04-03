@@ -14,8 +14,6 @@ from typing import Optional
 import chess
 import torch
 
-from neuralchess.encoders import get_encoder
-from neuralchess.encoders.base import PositionEncoder
 from neuralchess.models.base import ChessModel
 from neuralchess.zobrist import ZobristHasher
 
@@ -54,8 +52,7 @@ class SearchStats:
 class NeuralEngine:
     def __init__(
         self,
-        checkpoint_path: Optional[str] = None,
-        model: Optional[ChessModel] = None,
+        model: ChessModel,
         device: Optional[torch.device] = None,
         max_tt_size: int = 1_000_000,
         debug: bool = False,
@@ -63,19 +60,7 @@ class NeuralEngine:
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
-
-        if model is not None:
-            self.model = model
-            self.encoder: PositionEncoder = get_encoder("bitboard")
-        elif checkpoint_path is not None:
-            checkpoint = torch.load(
-                checkpoint_path, map_location=device, weights_only=False
-            )
-            self.model = self._build_model_from_checkpoint(checkpoint)
-            self.encoder = get_encoder(checkpoint.get("encoder_name", "bitboard"))
-        else:
-            raise ValueError("Either checkpoint_path or model must be provided")
-
+        self.model = model
         self.model.eval()
         self.model.to(self.device)
 
@@ -86,24 +71,6 @@ class NeuralEngine:
         self.stats = SearchStats()
         self._time_check_interval: int = 1024
         self._debug = debug
-
-    @staticmethod
-    def _build_model_from_checkpoint(checkpoint: dict) -> ChessModel:
-        from neuralchess.models import CNNConfig, NeuralChessNet
-
-        model_type = checkpoint.get("model_type", "cnn")
-        model_config = checkpoint.get("model_config", {})
-
-        if model_type == "cnn":
-            config = CNNConfig(**model_config) if model_config else CNNConfig()
-            model: ChessModel = NeuralChessNet(config)
-        else:
-            raise ValueError(f"Unknown model type: {model_type}")
-
-        state = checkpoint["model_state"]
-        state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
-        model.load_state_dict(state)
-        return model
 
     def search(
         self,
@@ -117,7 +84,6 @@ class NeuralEngine:
         if not legal_moves:
             return None, 0.0, []
 
-        # Default to the first legal move and its evaluation
         best_move = legal_moves[0]
         best_score = self._evaluate_position(board.fen())
         best_pv = [best_move]
@@ -306,12 +272,9 @@ class NeuralEngine:
         return best_score, best_pv
 
     def _evaluate_position(self, fen: str) -> float:
-        tensor = self.encoder.encode(fen).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            score = self.model(tensor).item()
-        # if self._debug:
-        #     logger.debug(f"Eval: fen={fen[:20]}... score={score:.6f}")
-        return float(score)
+        self.stats.eval_calls += 1
+        scores = self.model.evaluate([fen])
+        return scores[0]
 
     def _order_moves(
         self,

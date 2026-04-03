@@ -8,13 +8,16 @@ Architecture inspired by LC0's residual tower and Stockfish NNUE design principl
 - Small FC head for final evaluation
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 from torch import nn
 
-from neuralchess.models.base import ChessModel
+from neuralchess.encoders import get_encoder
+from neuralchess.models import ChessModel
+from neuralchess.models.base import ChessModel, ModelConfig
 
 
 class ResidualBlock(nn.Module):
@@ -33,11 +36,12 @@ class ResidualBlock(nn.Module):
 
 
 @dataclass
-class CNNConfig:
+class CNNConfig(ModelConfig):
+    encoder_name: str = "bitboard"
     input_channels: int = 14
-    entry_channels: int = 128
-    residual_channels: int = 128
-    residual_blocks: int = 4
+    entry_channels: int = 32
+    residual_channels: int = 32
+    residual_blocks: int = 2
     fc_hidden: tuple[int, ...] = (256,)
     kernel_size: int = 3
 
@@ -45,24 +49,25 @@ class CNNConfig:
 class NeuralChessNet(ChessModel):
     def __init__(self, config: Optional[CNNConfig] = None) -> None:
         super().__init__()
-        self.config = config or CNNConfig()
-        self._expected_input_shape = (self.config.input_channels, 8, 8)
+        self._config = config or CNNConfig()
+        self._encoder = get_encoder(self._config.encoder_name)
+        self._device = torch.device("cpu")
 
         entry_layers: list[nn.Module] = [
             nn.Conv2d(
-                self.config.input_channels,
-                self.config.entry_channels,
-                kernel_size=self.config.kernel_size,
-                padding=self.config.kernel_size // 2,
+                self._config.input_channels,
+                self._config.entry_channels,
+                kernel_size=self._config.kernel_size,
+                padding=self._config.kernel_size // 2,
             ),
             nn.ReLU(),
         ]
         self.entry = nn.Sequential(*entry_layers)
 
-        if self.config.entry_channels != self.config.residual_channels:
+        if self._config.entry_channels != self._config.residual_channels:
             self.bridge = nn.Conv2d(
-                self.config.entry_channels,
-                self.config.residual_channels,
+                self._config.entry_channels,
+                self._config.residual_channels,
                 kernel_size=1,
             )
         else:
@@ -70,29 +75,61 @@ class NeuralChessNet(ChessModel):
 
         self.residual_tower = nn.Sequential(
             *[
-                ResidualBlock(self.config.residual_channels)
-                for _ in range(self.config.residual_blocks)
+                ResidualBlock(self._config.residual_channels)
+                for _ in range(self._config.residual_blocks)
             ]
         )
 
         self.gap = nn.AdaptiveAvgPool2d(1)
 
         fc_layers: list[nn.Module] = []
-        prev = self.config.residual_channels
-        for hidden in self.config.fc_hidden:
+        prev = self._config.residual_channels
+        for hidden in self._config.fc_hidden:
             fc_layers.append(nn.Linear(prev, hidden))
             fc_layers.append(nn.ReLU())
             prev = hidden
         fc_layers.append(nn.Linear(prev, 1))
         self.fc = nn.Sequential(*fc_layers)
 
-    def forward(self, position: torch.Tensor) -> torch.Tensor:
-        x = self.entry(position)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.entry(x)
         x = self.bridge(x)
         x = self.residual_tower(x)
         x = self.gap(x).squeeze(-1).squeeze(-1)
         return torch.tanh(self.fc(x))
 
+    def evaluate(self, fens: list[str]) -> list[float]:
+        tensors = self._encoder.encode_batch(fens)
+        batch = torch.from_numpy(tensors).to(self._device)
+        with torch.no_grad():
+            scores = self(batch).squeeze(-1).tolist()
+        return scores
+
+    @classmethod
+    def from_checkpoint(
+        cls, checkpoint_path: str, device: torch.device
+    ) -> "NeuralChessNet":
+        checkpoint = torch.load(
+            checkpoint_path, map_location=device, weights_only=False
+        )
+        model_config = checkpoint.get("model_config", {})
+        config = CNNConfig(**model_config) if model_config else CNNConfig()
+        model = cls(config)
+
+        state = checkpoint["model_state"]
+        state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
+        model.load_state_dict(state)
+        model.to(device)
+        return model
+
+    @property
+    def config(self) -> CNNConfig:
+        return self._config
+
     @property
     def expected_input_shape(self) -> tuple[int, ...]:
-        return self._expected_input_shape
+        return self._encoder.output_shape
+
+    def to(self, device: torch.device) -> ChessModel:
+        self._device = device
+        return super().to(device)
