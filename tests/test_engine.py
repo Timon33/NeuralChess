@@ -21,7 +21,7 @@ def test_engine_loads_checkpoint(engine):
 
 def test_search_returns_move(engine):
     board = chess.Board()
-    move, score, pv = engine.search(board, movetime_ms=500)
+    move, score, pv = engine.search(board, max_depth=3)
     assert move is not None
     assert move in board.legal_moves
     assert isinstance(score, float)
@@ -30,27 +30,27 @@ def test_search_returns_move(engine):
 
 def test_search_single_move(engine):
     board = chess.Board("k7/8/8/8/8/8/8/K6R w - - 0 1")
-    move, score, pv = engine.search(board, movetime_ms=100)
+    move, score, pv = engine.search(board, max_depth=3)
     assert move is not None
 
 
 def test_search_checkmate_position(engine):
     board = chess.Board("k7/8/8/8/8/8/8/K7 w - - 0 1")
     assert not board.is_checkmate()
-    move, score, pv = engine.search(board, movetime_ms=100)
+    move, score, pv = engine.search(board, max_depth=3)
     assert move is not None
 
 
 def test_search_stalemate_position(engine):
     board = chess.Board("k7/P7/K7/8/8/8/8/8 b - - 0 1")
     assert board.is_stalemate()
-    move, score, pv = engine.search(board, movetime_ms=100)
+    move, score, pv = engine.search(board, max_depth=3)
     assert move is None
 
 
 def test_transposition_table_populated(engine):
     board = chess.Board()
-    engine.search(board, movetime_ms=500)
+    engine.search(board, max_depth=3)
     assert len(engine.tt) > 0
 
 
@@ -100,8 +100,28 @@ def test_move_ordering_promotions(engine):
 
 def test_nodes_searched_increases(engine):
     board = chess.Board()
-    engine.search(board, movetime_ms=200)
+    engine.search(board, max_depth=3)
     assert engine.nodes_searched > 0
+
+
+def test_search_interrupt(engine):
+    import threading
+    import time
+
+    board = chess.Board()
+    stop_event = threading.Event()
+
+    # Start search in a thread
+    def run_search():
+        engine.search(board, max_depth=20, stop_event=stop_event)
+
+    t = threading.Thread(target=run_search)
+    t.start()
+
+    time.sleep(0.1)
+    stop_event.set()
+    t.join(timeout=2.0)
+    assert not t.is_alive()
 
 
 def test_game_over_score_checkmate(engine):

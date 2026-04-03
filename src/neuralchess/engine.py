@@ -4,11 +4,12 @@ Neural chess engine with alpha-beta search, transposition table, and batched inf
 
 import logging
 import math
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
+from typing import Optional
 
 import chess
 import torch
@@ -21,7 +22,7 @@ from neuralchess.zobrist import ZobristHasher
 logger = logging.getLogger(__name__)
 
 
-class SearchTimeout(Exception):
+class SearchInterrupt(Exception):
     pass
 
 
@@ -57,7 +58,6 @@ class NeuralEngine:
         model: Optional[ChessModel] = None,
         device: Optional[torch.device] = None,
         max_tt_size: int = 1_000_000,
-        info_callback: Optional[Callable] = None,
         debug: bool = False,
     ) -> None:
         if device is None:
@@ -84,7 +84,6 @@ class NeuralEngine:
         self.max_tt_size = max_tt_size
 
         self.stats = SearchStats()
-        self._info_callback: Optional[Callable] = info_callback
         self._time_check_interval: int = 1024
         self._debug = debug
 
@@ -109,56 +108,43 @@ class NeuralEngine:
     def search(
         self,
         board: chess.Board,
-        movetime_ms: Optional[int] = None,
-        wtime_ms: Optional[int] = None,
-        btime_ms: Optional[int] = None,
         max_depth: int = 64,
+        stop_event: Optional[threading.Event] = None,
     ) -> tuple[Optional[chess.Move], float, list[chess.Move]]:
-        if movetime_ms is not None:
-            time_limit_ms = movetime_ms
-        elif wtime_ms is not None and btime_ms is not None:
-            remaining = wtime_ms if board.turn == chess.WHITE else btime_ms
-            time_limit_ms = min(remaining, 30000) // 30
-        else:
-            time_limit_ms = 1000
-
-        time_limit_ms = max(time_limit_ms, 10)
 
         start_time = time.time()
-        best_move: Optional[chess.Move] = None
-        best_score = 0.0
-        best_pv: list[chess.Move] = []
-
         legal_moves = list(board.legal_moves)
         if not legal_moves:
             return None, 0.0, []
 
+        # Default to the first legal move and its evaluation
+        best_move = legal_moves[0]
+        best_score = self._evaluate_position(board.fen())
+        best_pv = [best_move]
+
         if len(legal_moves) == 1:
-            score = self._evaluate_position(board.fen())
             if self._debug:
                 logger.info(
-                    f"Only legal move: {legal_moves[0].uci()}, eval={score:.4f}"
+                    f"Only legal move: {legal_moves[0].uci()}, eval={best_score:.4f}"
                 )
-            return legal_moves[0], score, [legal_moves[0]]
+            return best_move, best_score, best_pv
 
         self.tt.clear()
         self.stats = SearchStats()
 
         if self._debug:
-            logger.info(
-                f"Starting iterative deepening search (time_limit={time_limit_ms}ms)"
-            )
+            logger.info("Starting iterative deepening search")
 
         for depth in range(1, max_depth + 1):
-            elapsed_ms = (time.time() - start_time) * 1000
-            if elapsed_ms > time_limit_ms:
-                if self._debug:
-                    logger.info(f"Time limit reached at depth {depth}, stopping")
+            if stop_event and stop_event.is_set():
                 break
 
-            move, score, pv = self._search_root(
-                board, depth, legal_moves, start_time, time_limit_ms
-            )
+            try:
+                move, score, pv = self._search_root(
+                    board, depth, legal_moves, stop_event
+                )
+            except SearchInterrupt:
+                break
 
             if move is not None:
                 best_move = move
@@ -168,21 +154,12 @@ class NeuralEngine:
                 elapsed_ms = (time.time() - start_time) * 1000
                 nps = int(self.stats.nodes_searched / max(elapsed_ms / 1000, 0.001))
                 if self._debug:
-                    pv_str = " ".join(m.uci() for m in pv[:5])
+                    pv_str = " ".join(m.uci() for m in pv)
                     logger.info(
                         f"d{depth} score={score:+.4f} pv={pv_str} "
                         f"nodes={self.stats.nodes_searched} nps={nps} "
                         f"tt_hit={self.stats.tt_hits} tt_miss={self.stats.tt_misses} "
                         f"cutoffs={self.stats.beta_cutoffs}"
-                    )
-                if self._info_callback:
-                    self._info_callback(
-                        depth=depth,
-                        score=score,
-                        pv=pv,
-                        nodes=self.stats.nodes_searched,
-                        nps=nps,
-                        time_ms=int(elapsed_ms),
                     )
 
         return best_move, best_score, best_pv
@@ -223,8 +200,7 @@ class NeuralEngine:
         board: chess.Board,
         depth: int,
         legal_moves: list[chess.Move],
-        start_time: float,
-        time_limit_ms: int,
+        stop_event: Optional[threading.Event] = None,
     ) -> tuple[Optional[chess.Move], float, list[chess.Move]]:
         best_move: Optional[chess.Move] = None
         best_score = -math.inf
@@ -233,18 +209,17 @@ class NeuralEngine:
         ordered_moves = self._order_moves(board, legal_moves)
 
         for move in ordered_moves:
-            elapsed_ms = (time.time() - start_time) * 1000
-            if elapsed_ms > time_limit_ms:
-                break
+            if stop_event and stop_event.is_set():
+                raise SearchInterrupt()
 
             board.push(move)
             try:
                 score, pv = self._alphabeta(
-                    board, depth - 1, -math.inf, math.inf, start_time, time_limit_ms
+                    board, depth - 1, -math.inf, math.inf, stop_event
                 )
-            except SearchTimeout:
+            except SearchInterrupt:
                 board.pop()
-                break
+                raise
             score = -score
             board.pop()
 
@@ -252,9 +227,6 @@ class NeuralEngine:
                 best_score = score
                 best_move = move
                 best_pv = [move] + pv
-
-        if best_move is None:
-            return None, 0.0, []
 
         return best_move, best_score, best_pv
 
@@ -264,15 +236,13 @@ class NeuralEngine:
         depth: int,
         alpha: float,
         beta: float,
-        start_time: float,
-        time_limit_ms: int,
+        stop_event: Optional[threading.Event] = None,
     ) -> tuple[float, list[chess.Move]]:
         self.stats.nodes_searched += 1
 
         if self.stats.nodes_searched % self._time_check_interval == 0:
-            elapsed_ms = (time.time() - start_time) * 1000
-            if elapsed_ms > time_limit_ms:
-                raise SearchTimeout()
+            if stop_event and stop_event.is_set():
+                raise SearchInterrupt()
 
         if board.is_game_over():
             score = self._game_over_score(board)
@@ -307,10 +277,8 @@ class NeuralEngine:
         for move in ordered_moves:
             board.push(move)
             try:
-                score, pv = self._alphabeta(
-                    board, depth - 1, -beta, -alpha, start_time, time_limit_ms
-                )
-            except SearchTimeout:
+                score, pv = self._alphabeta(board, depth - 1, -beta, -alpha, stop_event)
+            except SearchInterrupt:
                 board.pop()
                 raise
             score = -score
@@ -341,8 +309,8 @@ class NeuralEngine:
         tensor = self.encoder.encode(fen).unsqueeze(0).to(self.device)
         with torch.no_grad():
             score = self.model(tensor).item()
-        if self._debug:
-            logger.debug(f"Eval: fen={fen[:20]}... score={score:.6f}")
+        # if self._debug:
+        #     logger.debug(f"Eval: fen={fen[:20]}... score={score:.6f}")
         return float(score)
 
     def _order_moves(
