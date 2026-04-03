@@ -6,38 +6,46 @@ to tensors using the specified encoder, and saves as precomputed .npy arrays.
 """
 
 import argparse
+import math
 import os
+import re
 import subprocess
 import sys
 import zipfile
 from multiprocessing import Pool, cpu_count
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-from neuralchess.core import parse_eval, scale_eval
 from neuralchess.encoders import ENCODER_REGISTRY, get_encoder
 from neuralchess.encoders.base import PositionEncoder
 
-FEN_CANDIDATES = ["fen", "FEN", "Fen"]
-EVAL_CANDIDATES = [
-    "eval",
-    "evaluation",
-    "Evaluation",
-    "Eval",
-    "centipawns",
-    "centipawn",
-]
-
+FEN_ROW_NAME = "FEN"
+EVAL_ROW_NAME = "Evaluation"
 BATCH_SIZE = 10000
 KAGGLE_DATASET = "ronakbadhe/chess-evaluations"
 RAW_CSV_NAME = "chessData.csv"
 
 _ENCODER_CACHE: dict[str, "PositionEncoder"] = {}
+
+MATE_VALUE = 2000.0
+MATE_PATTERN = re.compile(r"^#([+-]?)(\d+)$")
+
+SAMPLE_SIZE = 5
+
+def parse_eval(raw: str | int | float) -> float:
+    """
+    convert centipawns stockfish evaluation to win prop
+    :param raw: cp
+    :return: win prop
+    """
+    raw = str(raw).strip()
+    match = MATE_PATTERN.match(raw)
+    if match:
+        return -1.0 if match.group(1) == "-" else 1.0
+
+    return 0.5 * (2 / (1 + math.exp(-0.00368208 * float(raw))))
 
 
 def _worker_init(encoder_name: str) -> None:
@@ -58,22 +66,12 @@ def _encode_chunk(
 
     for i, (fen, cp) in enumerate(zip(fens, evals)):
         try:
-            tensors[i] = encoder.encode(str(fen)).numpy()
-            scaled_evals[i] = scale_eval(parse_eval(str(cp)))
+            tensors[i] = encoder.encode_position(str(fen)).numpy()
+            scaled_evals[i] = parse_eval(str(cp))
         except Exception:
             valid_mask[i] = False
 
     return tensors[valid_mask], scaled_evals[valid_mask], int(~valid_mask.any())
-
-
-def detect_column(df: pd.DataFrame, candidates: list[str]) -> str:
-    for name in candidates:
-        if name in df.columns:
-            return name
-    raise ValueError(
-        f"Could not detect column. Available: {list(df.columns)}. "
-        f"Expected one of the candidates: {candidates}"
-    )
 
 
 def download_kaggle_dataset(raw_dir: str) -> str:
@@ -132,30 +130,92 @@ def download_kaggle_dataset(raw_dir: str) -> str:
     return csv_path
 
 
+def _log_sample_data(
+    fens: list[str],
+    evals: list[str],
+    tensors: np.ndarray,
+    scaled_evals: np.ndarray,
+) -> None:
+    n = min(SAMPLE_SIZE, len(fens))
+
+    print(f"\n--- First {n} encoded datapoints ---")
+    for i in range(n):
+        t = tensors[i]
+        print(
+            f"  [{i + 1}] tensor_shape={t.shape} | "
+            f"tensor_range=[{t.min():.4f}, {t.max():.4f}] | "
+            f"scaled_eval={scaled_evals[i]:.4f}"
+        )
+    print()
+
+
+def _load_csv_data(
+    csv_path: str,
+    encoder_name: str,
+    max_rows: int | None = None,
+) -> tuple[list[str], list[str], "PositionEncoder"]:
+    encoder = get_encoder(encoder_name)
+    print(f"Using encoder: {encoder_name} → output shape {encoder.output_shape}")
+
+    print(f"Loading CSV: {csv_path}")
+    df = pd.read_csv(csv_path)
+    print(f"Total rows: {len(df)}")
+
+    if max_rows is not None:
+        df = df.head(max_rows)
+
+    fens = df[FEN_ROW_NAME].astype(str).tolist()
+    evals = df[EVAL_ROW_NAME].astype(str).tolist()
+
+    n = min(SAMPLE_SIZE, len(fens))
+    print(f"\n--- First {n} CSV rows ---")
+    for i in range(n):
+        fen_preview = fens[i][:80] + ("..." if len(fens[i]) > 80 else "")
+        print(f"  [{i + 1}] FEN={fen_preview} | Eval={evals[i]}")
+    print()
+
+    return fens, evals, encoder
+
+
+def _save_results(
+    tensors: np.ndarray,
+    scaled_evals: np.ndarray,
+    output_dir: str,
+    skipped: int,
+) -> None:
+    tensors_path = os.path.join(output_dir, "tensors.npy")
+    evals_path = os.path.join(output_dir, "evals.npy")
+
+    print(f"Saving tensors to {tensors_path}")
+    np.save(tensors_path, tensors)
+    print(f"Saving evals to {evals_path}")
+    np.save(evals_path, scaled_evals)
+
+    print(f"Done. Saved {len(tensors)} positions, skipped {skipped}.")
+
+
 def preprocess_csv(
     csv_path: str,
     output_dir: str,
     encoder_name: str,
     max_rows: int | None = None,
+    n_jobs: int | None = None,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
+    fens, evals, encoder = _load_csv_data(csv_path, encoder_name, max_rows)
 
-    encoder = get_encoder(encoder_name)
-    print(f"Using encoder: {encoder.name} → output shape {encoder.output_shape}")
+    if n_jobs is None:
+        _preprocess_sequential(fens, evals, encoder, output_dir)
+    else:
+        _preprocess_parallel(fens, evals, encoder_name, output_dir, n_jobs)
 
-    print(f"Loading CSV: {csv_path}")
-    df = pd.read_csv(csv_path)
-    if max_rows is not None:
-        df = df.head(max_rows)
 
-    fen_col = detect_column(df, FEN_CANDIDATES)
-    eval_col = detect_column(df, EVAL_CANDIDATES)
-    print(f"Detected columns: FEN='{fen_col}', eval='{eval_col}'")
-    print(f"Total positions: {len(df)}")
-
-    fens = df[fen_col].astype(str).tolist()
-    evals = df[eval_col].astype(str).tolist()
-
+def _preprocess_sequential(
+    fens: list[str],
+    evals: list[str],
+    encoder: "PositionEncoder",
+    output_dir: str,
+) -> None:
     n = len(fens)
     shape = (n, *encoder.output_shape)
     tensors = np.zeros(shape, dtype=np.float32)
@@ -170,61 +230,44 @@ def preprocess_csv(
 
         for i, (fen, cp) in enumerate(zip(batch_fens, batch_evals)):
             try:
-                tensors[start + i] = encoder.encode(fen).numpy()
-                scaled_evals[start + i] = scale_eval(parse_eval(cp))
+                tensors[start + i] = encoder.encode_position(fen).numpy()
+                scaled_evals[start + i] = parse_eval(cp)
             except Exception:
                 valid_mask[start + i] = False
                 skipped += 1
 
     tensors = tensors[valid_mask]
     scaled_evals = scaled_evals[valid_mask]
-
-    tensors_path = os.path.join(output_dir, "tensors.npy")
-    evals_path = os.path.join(output_dir, "evals.npy")
-
-    print(f"Saving tensors to {tensors_path}")
-    np.save(tensors_path, tensors)
-    print(f"Saving evals to {evals_path}")
-    np.save(evals_path, scaled_evals)
-
-    print(f"Done. Saved {len(tensors)} positions, skipped {skipped}.")
+    _log_sample_data(fens, evals, tensors, scaled_evals)
+    _save_results(tensors, scaled_evals, output_dir, skipped)
 
 
-def preprocess_csv_parallel(
-    csv_path: str,
-    output_dir: str,
+def _preprocess_parallel(
+    fens: list[str],
+    evals: list[str],
     encoder_name: str,
-    max_rows: int | None = None,
-    n_jobs: int | None = None,
+    output_dir: str,
+    n_jobs: int,
 ) -> None:
-    os.makedirs(output_dir, exist_ok=True)
-
     encoder = get_encoder(encoder_name)
-    print(f"Using encoder: {encoder.name} → output shape {encoder.output_shape}")
-
-    print(f"Loading CSV: {csv_path}")
-    df = pd.read_csv(csv_path)
-    if max_rows is not None:
-        df = df.head(max_rows)
-
-    fen_col = detect_column(df, FEN_CANDIDATES)
-    eval_col = detect_column(df, EVAL_CANDIDATES)
-    print(f"Detected columns: FEN='{fen_col}', eval='{eval_col}'")
-    print(f"Total positions: {len(df)}")
-
-    fens = df[fen_col].astype(str).tolist()
-    evals = df[eval_col].astype(str).tolist()
 
     if n_jobs is None:
         n_jobs = max(1, cpu_count() - 1)
 
     chunk_size = BATCH_SIZE
-    chunks = []
-    chunk_sizes = []
-    for start in range(0, len(fens), chunk_size):
-        end = min(start + chunk_size, len(fens))
-        chunks.append((fens[start:end], evals[start:end], encoder_name))
-        chunk_sizes.append(end - start)
+    chunks = [
+        (
+            fens[start : min(start + chunk_size, len(fens))],
+            evals[start : min(start + chunk_size, len(fens))],
+            encoder_name,
+        )
+        for start in range(0, len(fens), chunk_size)
+    ]
+    chunk_sizes = [
+        end - start
+        for start in range(0, len(fens), chunk_size)
+        for end in [min(start + chunk_size, len(fens))]
+    ]
 
     valid_tensors: list[np.ndarray] = []
     valid_evals: list[np.ndarray] = []
@@ -254,15 +297,8 @@ def preprocess_csv_parallel(
         tensors = np.zeros((0, *encoder.output_shape), dtype=np.float32)
         scaled_evals = np.zeros(0, dtype=np.float32)
 
-    tensors_path = os.path.join(output_dir, "tensors.npy")
-    evals_path = os.path.join(output_dir, "evals.npy")
-
-    print(f"Saving tensors to {tensors_path}")
-    np.save(tensors_path, tensors)
-    print(f"Saving evals to {evals_path}")
-    np.save(evals_path, scaled_evals)
-
-    print(f"Done. Saved {len(tensors)} positions, skipped {total_skipped}.")
+    _log_sample_data(fens[: len(fens)], evals[: len(evals)], tensors, scaled_evals)
+    _save_results(tensors, scaled_evals, output_dir, total_skipped)
 
 
 def main() -> None:
@@ -275,8 +311,8 @@ def main() -> None:
     parser.add_argument(
         "--architecture",
         type=str,
-        default="bitboard",
-        help=f"Encoder architecture: {available_encoders} (default: bitboard)",
+        required=True,
+        help=f"Encoder architecture (required): {available_encoders}",
     )
     parser.add_argument(
         "--max-rows", type=int, default=None, help="Limit to N rows (default: all)"
@@ -292,8 +328,8 @@ def main() -> None:
     parser.add_argument(
         "--n-jobs",
         type=int,
-        default=None,
-        help="Number of parallel workers (default: CPU count - 1)",
+        default=4,
+        help="Number of parallel workers (default: 8)",
     )
     args = parser.parse_args()
 
@@ -316,12 +352,8 @@ def main() -> None:
         sys.exit(1)
 
     arch_dir = os.path.join(args.output_dir, args.architecture)
-    if args.parallel:
-        preprocess_csv_parallel(
-            csv_path, arch_dir, args.architecture, args.max_rows, args.n_jobs
-        )
-    else:
-        preprocess_csv(csv_path, arch_dir, args.architecture, args.max_rows)
+    n_jobs = args.n_jobs if args.parallel else None
+    preprocess_csv(csv_path, arch_dir, args.architecture, args.max_rows, n_jobs)
 
 
 if __name__ == "__main__":

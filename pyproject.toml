@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 neuralchess-uci = "neuralchess.uci:main"
 neuralchess-train = "neuralchess.train:main"
+neuralchess-data = "neuralchess.download_data:main"
 
 [project.optional-dependencies]
 dev = [
