@@ -44,7 +44,7 @@ def parse_eval(raw: str | int | float) -> float:
     raw = str(raw).strip()
     match = MATE_PATTERN.match(raw)
     if match:
-        return -1.0 if match.group(1) == "-" else 1.0
+        return 0.0 if match.group(1) == "-" else 1.0
 
     return 0.5 * (2 / (1 + math.exp(-0.00368208 * float(raw))))
 
@@ -159,11 +159,11 @@ def _load_csv_data(
     print(f"Using encoder: {encoder_name} → output shape {encoder.output_shape}")
 
     print(f"Loading CSV: {csv_path}")
-    df = pd.read_csv(csv_path)
-    print(f"Total rows: {len(df)}")
+    df = pd.read_csv(csv_path, nrows=max_rows)
+    print(f"Loaded {len(df)} rows")
 
-    if max_rows is not None:
-        df = df.head(max_rows)
+    # if max_rows is not None:
+    #     df = df.head(max_rows)
 
     fens = df[FEN_ROW_NAME].astype(str).tolist()
     evals = df[EVAL_ROW_NAME].astype(str).tolist()

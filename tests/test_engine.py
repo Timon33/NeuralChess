@@ -53,8 +53,13 @@ def test_game_over_score_checkmate(engine):
     score = engine._game_over_score(board)
     assert score == 1.0
 
+    board = chess.Board("K6r/8/1k6/8/8/8/8/8 w - - 1 1")
+    assert board.is_checkmate()
+    score = engine._game_over_score(board)
+    assert score == 0.0
+
 
 def test_game_over_score_stalemate(engine):
     board = chess.Board("k7/8/2K5/8/8/8/8/8 b - - 0 1")
     score = engine._game_over_score(board)
-    assert score == 0.0
+    assert score == 0.5

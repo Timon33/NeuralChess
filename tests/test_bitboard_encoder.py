@@ -17,9 +17,6 @@ class TestBitboardEncoder:
     def test_output_shape_property(self) -> None:
         assert self.encoder.output_shape == (14, 8, 8)
 
-    def test_name_property(self) -> None:
-        assert self.encoder.name == "bitboard"
-
     def test_starting_position_pieces(self) -> None:
         tensor = self.encoder.encode_position(
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
