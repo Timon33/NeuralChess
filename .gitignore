@@ -79,6 +79,7 @@ Thumbs.db
 
 # Data files (large, don't commit)
 data/
+data_overfit/
 *.csv
 *.zip
 *.tar.gz

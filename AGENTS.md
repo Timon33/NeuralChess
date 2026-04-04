@@ -20,8 +20,10 @@ Encoders convert FEN strings to tensors. Each encoder has a `name` and `output_s
 - Channel 13: Castling availability (1s on squares with castling rights)
 
 ### Evaluation Scaling
-- Centipawn scores from dataset are scaled via: `tanh(cp / 600)`
-- This maps typical evals (±600cp) to roughly ±0.76, with extreme values asymptoting to ±1
+- Centipawn scores from dataset are scaled via: `0.5 * (2 / (1 + exp(-0.00368208 * cp)))`
+- This maps typical evals (±600cp) to roughly (0, 1) win probability
+- Mate scores are mapped to `1.0` (white mate) or `0.0` (black mate)
+- All models must use a sigmoid output activation to match this `(0, 1)` target range
 
 ## Code Conventions
 
@@ -35,12 +37,15 @@ Encoders convert FEN strings to tensors. Each encoder has a `name` and `output_s
 
 | Module | Responsibility |
 |--------|---------------|
-| `core/eval_utils.py` | `parse_eval()`, `scale_eval()` — architecture-agnostic |
+| `download_data.py` | `parse_eval()` — scales evals to (0, 1) win probability |
 | `core/dataset.py` | `ChessDataset` — loads precomputed `.npy` tensors/evals |
 | `encoders/base.py` | `PositionEncoder` ABC — interface for FEN→tensor encoders |
 | `encoders/bitboard.py` | `BitboardEncoder` — CNN-specific 14×8×8 bitboard encoding |
+| `encoders/tokenizer.py` | `TokenEncoder` — transformer-specific 70-token sequence encoding |
 | `encoders/__init__.py` | `ENCODER_REGISTRY`, `get_encoder()` — encoder factory |
 | `models/base.py` | `ChessModel` ABC — interface for neural architectures |
+| `models/cnn.py` | `NeuralChessNet` — CNN with residual blocks |
+| `models/transformer.py` | `TransformerChessNet` — transformer encoder with final LayerNorm |
 | `engine.py` | `NeuralEngine` move selection |
 | `play.py` | Interactive CLI game loop, board display, move input |
 | `uci.py` | Full UCI protocol implementation |
