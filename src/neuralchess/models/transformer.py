@@ -46,7 +46,10 @@ class TransformerChessNet(ChessModel):
             norm_first=True,
         )
         self.transformer = nn.TransformerEncoder(
-            encoder_layer, num_layers=self._config.num_layers
+            encoder_layer,
+            num_layers=self._config.num_layers,
+            norm=nn.LayerNorm(self._config.d_model),
+            enable_nested_tensor=False,
         )
 
         self.head = nn.Linear(self._config.d_model, 1)

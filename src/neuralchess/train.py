@@ -7,6 +7,7 @@ Architecture-agnostic checkpoint format.
 """
 
 import argparse
+import json
 import os
 import random
 from dataclasses import asdict
@@ -232,7 +233,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train NeuralChess model")
     parser.add_argument("--model-type", type=str, required=True)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--data-dir", type=str, required=True)
@@ -249,6 +250,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument(
         "--no-tensorboard", action="store_true", help="Disable TensorBoard logging"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to JSON config file for model architecture",
     )
     return parser.parse_args()
 
@@ -295,9 +302,19 @@ def main() -> None:
     model_type = args.model_type
     checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint_name)
 
-    if os.path.isfile(checkpoint_path):
-        print(f"WARNING: checkpoint {checkpoint_path} already exists")
+    if args.config:
+        config_path = args.config
+        if not os.path.isabs(config_path):
+            config_path = os.path.join(
+                os.path.dirname(__file__), "..", "..", config_path
+            )
+        print(f"Loading model config from {config_path}")
+        with open(config_path, "r") as f:
+            model_config = json.load(f)
+        print(f"Config: {model_config}")
 
+    if os.path.isfile(checkpoint_path):
+        print(f"WARNING: checkpoint {checkpoint_path} already exists. It will be overwritten.")
 
     if args.resume:
         resume_path = os.path.join(args.checkpoint_dir, args.resume)
@@ -384,7 +401,7 @@ def main() -> None:
         val_range = val_metrics["max"] - val_metrics["min"]
 
         print(f"\n{'=' * 60}")
-        print(f"Epoch {epoch}/{args.epochs - 1}")
+        print(f"Epoch {epoch + 1}/{args.epochs}")
         print(f"{'=' * 60}")
         print(
             f"  Train Loss: {train_metrics['mean']:.4f} ± {train_metrics['std']:.4f}  (range: {train_metrics['min']:.4f} → {train_metrics['max']:.4f})"
@@ -437,6 +454,7 @@ if modal is not None:
         modal.Image.debian_slim()
         .pip_install_from_pyproject("pyproject.toml")
         .add_local_python_source("neuralchess")
+        .add_local_dir("configs", remote_path="/root/configs")
     )
 
     # 2. Mount the Persistent Volume
@@ -446,7 +464,7 @@ if modal is not None:
     @app.function(
         image=image,
         volumes={"/vol": volume},
-        gpu="T4",  # Automatically acquires an available GPU
+        gpu="L40S",  # Automatically acquires an available GPU
         timeout=86400,  # 24 hour timeout for training
     )
     def modal_main(*args):

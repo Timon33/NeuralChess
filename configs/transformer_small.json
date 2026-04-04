@@ -1,0 +1,5 @@
+{
+  "d_model": 128,
+  "nhead": 4,
+  "num_layers": 4
+}

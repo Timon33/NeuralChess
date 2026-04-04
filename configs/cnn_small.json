@@ -1,0 +1,6 @@
+{
+  "entry_channels": 32,
+  "residual_channels": 32,
+  "residual_blocks": 3,
+  "fc_hidden": [128]
+}

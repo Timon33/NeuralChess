@@ -43,10 +43,10 @@ class ResidualBlock(nn.Module):
 class CNNConfig(ModelConfig):
     encoder_name: str = "bitboard"
     input_channels: int = 14
-    entry_channels: int = 128
-    residual_channels: int = 128
-    residual_blocks: int = 10
-    fc_hidden: tuple[int, ...] = (512, 256)
+    entry_channels: int = 64
+    residual_channels: int = 64
+    residual_blocks: int = 6
+    fc_hidden: tuple[int, ...] = (256, 128)
     kernel_size: int = 3
 
 
