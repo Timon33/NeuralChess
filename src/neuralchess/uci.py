@@ -93,7 +93,7 @@ class UCIHandler:
 
     def _handle_go(self, args: list[str]) -> None:
         self._handle_stop()
-        score, best_move = self.engine.evaluate_position(self.board)[0]
+        score, best_move = self.engine.evaluate_position(self.board)
 
         if best_move is not None:
             self._send(f"bestmove {best_move.uci()}")
@@ -121,7 +121,7 @@ def main() -> None:
     log_level = logging.DEBUG if args.debug else logging.INFO
     handlers = []
     if args.log:
-        handlers.append(logging.FileHandler(args.log))
+        handlers.append(logging.FileHandler(args.log, mode="w"))
 
     logging.basicConfig(
         level=log_level,

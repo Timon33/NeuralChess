@@ -23,7 +23,7 @@ def test_engine_loads_checkpoint(engine):
 
 def test_search_returns_move(engine):
     board = chess.Board()
-    score, move = engine.evaluate_position(board)[0]
+    score, move = engine.evaluate_position(board)
     assert move is not None
     assert move in board.legal_moves
     assert isinstance(score, float)
@@ -31,7 +31,7 @@ def test_search_returns_move(engine):
 
 def test_search_single_move(engine):
     board = chess.Board("7r/2k5/8/8/8/8/r7/7K w - - 0 1")
-    score, move= engine.evaluate_position(board)[0]
+    score, move= engine.evaluate_position(board)
     assert move == chess.Move.from_uci("h1g1")
 
 

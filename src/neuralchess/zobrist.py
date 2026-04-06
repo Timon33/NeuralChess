@@ -24,7 +24,7 @@ class ZobristHasher:
             [rng.getrandbits(64) for _ in range(64)] for _ in range(12)
         ]
         self._castling_table: list[int] = [rng.getrandbits(64) for _ in range(16)]
-        self._ep_table: list[int] = [rng.getrandbits(64) for _ in range(64)]
+        # self._ep_table: list[int] = [rng.getrandbits(64) for _ in range(64)]
         self._side: int = rng.getrandbits(64)
 
     def hash_board(self, board: chess.Board) -> int:
@@ -47,8 +47,8 @@ class ZobristHasher:
             castling_index |= 8
         h ^= self._castling_table[castling_index]
 
-        if board.ep_square is not None:
-            h ^= self._ep_table[board.ep_square]
+        # if board.ep_square is not None:
+        #     h ^= self._ep_table[board.ep_square]
 
         if board.turn == chess.BLACK:
             h ^= self._side
