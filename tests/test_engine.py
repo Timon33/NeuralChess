@@ -31,20 +31,22 @@ def test_search_returns_move(engine):
 
 def test_search_single_move(engine):
     board = chess.Board("7r/2k5/8/8/8/8/r7/7K w - - 0 1")
-    score, move= engine.evaluate_position(board)
+    score, move = engine.evaluate_position(board)
     assert move == chess.Move.from_uci("h1g1")
 
 
 def test_search_checkmate_position(engine):
     board = chess.Board("8/R7/8/8/8/k1K5/8/8 b - - 0 1")
     assert board.is_checkmate()
-    assert len(engine.evaluate_position(board)) == 0
+    score, move = engine.evaluate_position(board)
+    assert move == chess.Move.null()
 
 
 def test_search_stalemate_position(engine):
     board = chess.Board("k7/P7/K7/8/8/8/8/8 b - - 0 1")
     assert board.is_stalemate()
-    assert len(engine.evaluate_position(board)) == 0
+    score, move = engine.evaluate_position(board)
+    assert move == chess.Move.null()
 
 
 def test_game_over_score_checkmate(engine):

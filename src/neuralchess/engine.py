@@ -1,8 +1,9 @@
 """
-Neural chess engine with alpha-beta search and batched inference.
+Neural chess engine with batched quiescence search.
 """
 
 import logging
+import time
 from typing import Optional, List, Tuple
 
 import chess
@@ -12,6 +13,20 @@ from neuralchess.models.base import ChessModel
 from neuralchess.zobrist import ZobristHasher
 
 logger = logging.getLogger(__name__)
+
+
+MAX_BATCH_SIZE = 4096
+
+
+class QNode:
+    def __init__(self, board: chess.Board, depth: int):
+        self.board = board
+        self.depth = depth
+        self.stand_pat_score: float = 0.5
+        self.children: List[Tuple[chess.Move, "QNode"]] = []
+        self.is_leaf = False
+        self.is_game_over = False
+        self.turn = board.turn
 
 
 class NeuralEngine:
@@ -28,143 +43,159 @@ class NeuralEngine:
         self.model.to(self.device)
 
         self._hasher = ZobristHasher()
-        self.tt = {}
-
-    def _store_position(self, board: chess.Board, score: float, visits: int, best_move: Optional[chess.Move]) -> None:
-        self.tt[self._hasher.hash_board(board)] = (score, visits, best_move)
-
-    def _get_position(self, board: chess.Board) -> tuple[float, int, Optional[chess.Move]]:
-        return self.tt[self._hasher.hash_board(board)]
 
     @staticmethod
     def _game_over_score(board: chess.Board) -> float:
         if board.is_checkmate():
-            return 0 if board.turn else 1
+            return 0.0 if board.turn else 1.0
         return 0.5
 
-    def _evaluate_leaves(
-        self, board: chess.Board, moves: List[chess.Move]
-    ) -> List[Tuple[float, chess.Move]]:
-        """Batch evaluates moves and returns them sorted by score."""
-        positions = []
-        moves_to_eval = []
-        game_over_moves = []
+    def _is_noisy(self, board: chess.Board, move: chess.Move) -> bool:
+        return (
+            board.is_capture(move)
+            or move.promotion is not None
+            or board.gives_check(move)
+        )
 
-        logger.debug(f"Evaluating position\n{board}")
+    def batched_qsearch(
+        self, root_board: chess.Board, max_depth: int = 10
+    ) -> Tuple[float, Optional[chess.Move]]:
+        start_time = time.time()
 
-        # iterate all moves
-        for move in moves:
-            board.push(move)
-            if board.is_game_over():
-                score = self._game_over_score(board)
-                game_over_moves.append((score, move))
-                self._store_position(board, score, 1, chess.Move.null())
-            else:
-                positions.append(board.fen())
-                moves_to_eval.append(move)
-            board.pop()
+        root = QNode(root_board.copy(), 0)
+        frontier = [root]
 
-        # evaluate non game over positions
-        if positions:
-            eval_scores = self.model.evaluate(positions)
-        else:
-            eval_scores = []
+        stats = {
+            "nodes_visited": 0,
+            "unique_positions_evaluated": 0,
+            "max_depth_reached": 0,
+            "batches_processed": 0,
+        }
 
-        # store evaluations
-        for score, pos in zip(eval_scores, positions):
-            self._store_position(chess.Board(pos), score, 1, None)
+        logger.debug(f"Starting batched qsearch with max_depth={max_depth}")
 
-        scored_moves = game_over_moves + list(zip(eval_scores, moves_to_eval))
-        scored_moves.sort(key=lambda x: x[0], reverse=board.turn)
+        while frontier:
+            stats["batches_processed"] += 1
+            stats["nodes_visited"] += len(frontier)
 
-        logger.debug(f"Evals")
-        for s, m, pos in sorted(list(zip(eval_scores, moves_to_eval, positions)), key=lambda x: x[0], reverse=board.turn):
-            logger.debug(f"{m} -> {pos}: {s}")
+            # 1. Evaluate current frontier
+            eval_nodes = []
+            fens = []
 
-        return scored_moves
+            for node in frontier:
+                stats["max_depth_reached"] = max(stats["max_depth_reached"], node.depth)
 
-    def _explore_pv(self, board: chess.Board, depth: int) -> tuple[float, list[chess.Move]]:
-        score, visits, best_move = self._get_position(board)
-        side = 1 if board.turn else -1
-        if best_move == chess.Move.null() or depth <= 0:
-            return score, []
-        if best_move is None:
-            # this is the end of the pv, evaluate here
-            scored_moves = self._evaluate_leaves(board, list(board.legal_moves))
-            best_score = scored_moves[0][0]
-            best_move = scored_moves[0][1]
+                if node.board.is_game_over():
+                    node.is_game_over = True
+                    node.stand_pat_score = self._game_over_score(node.board)
+                    node.is_leaf = True
+                else:
+                    eval_nodes.append(node)
+                    fens.append(node.board.fen())
 
-            self._store_position(board, best_score, visits + 1, best_move)
-            return best_score, [best_move]
+            if fens:
+                unique_fens = list(set(fens))
+                stats["unique_positions_evaluated"] += len(unique_fens)
+                logger.debug(
+                    f"Depth {frontier[0].depth}: Evaluating batch of {len(unique_fens)} unique positions "
+                    f"(from {len(fens)} nodes)"
+                )
 
-        # if already explored go deeper
-        board.push(best_move)
-        logger.debug(f"Searching along move {best_move}")
-        updated_score, pv = self._explore_pv(board, depth=depth - 1)
-        board.pop()
+                scores = []
+                for i in range(0, len(unique_fens), MAX_BATCH_SIZE):
+                    batch = unique_fens[i : i + MAX_BATCH_SIZE]
+                    scores.extend(self.model.evaluate(batch))
+                fen_to_score = dict(zip(unique_fens, scores))
 
-        logger.debug(f"Score update for move {best_move}: {score * side} -> {updated_score * side}")
-        # check if score worsen, if yes we might have to find the new best move
-        if (side * updated_score) < (side * score):
-            scored_moves = []
-            for move in board.legal_moves:
-                board.push(move)
-                move_score, _, _ = self._get_position(board)
-                scored_moves.append((move_score, move))
-                board.pop()
+                for node, fen in zip(eval_nodes, fens):
+                    node.stand_pat_score = fen_to_score[fen]
 
-            scored_moves.sort(key=lambda x: x[0], reverse=board.turn)
-            best_score = scored_moves[0][0]
-            best_move = scored_moves[0][1]
-            self._store_position(board, best_score, visits + 1, best_move)
-            logger.debug(f"Best move {best_move}: {best_score}, visits {visits}, [{pv}]")
-            return best_score, [] + pv
-        else:
-            # still the best move, update score
-            self._store_position(board, updated_score, visits + 1, best_move)
-            logger.debug(f"Best move {best_move}: {updated_score}, visits {visits} [{pv}]")
-            return updated_score, [best_move] + pv
+            # 2. Expand current frontier
+            new_frontier = []
+            for node in eval_nodes:
+                if node.depth >= max_depth:
+                    node.is_leaf = True
+                    continue
 
+                moves = list(node.board.legal_moves)
+                if not moves:
+                    node.is_leaf = True
+                    continue
+
+                expanded_any = False
+                for move in moves:
+                    if node.depth == 0 or self._is_noisy(node.board, move):
+                        child_board = node.board.copy()
+                        child_board.push(move)
+                        child_node = QNode(child_board, node.depth + 1)
+                        node.children.append((move, child_node))
+                        new_frontier.append(child_node)
+                        expanded_any = True
+
+                if not expanded_any:
+                    node.is_leaf = True
+
+            frontier = new_frontier
+
+        # 3. Minimax Backpropagation
+        def minimax(node: QNode) -> float:
+            if node.is_leaf or not node.children:
+                return node.stand_pat_score
+
+            best_score = -float("inf") if node.turn else float("inf")
+
+            can_stand_pat = node.depth > 0 and not node.board.is_check()
+            if can_stand_pat:
+                best_score = node.stand_pat_score
+
+            for _, child in node.children:
+                score = minimax(child)
+                if node.turn:
+                    best_score = max(best_score, score)
+                else:
+                    best_score = min(best_score, score)
+
+            return best_score
+
+        if not root.children:
+            return root.stand_pat_score, None
+
+        best_move = None
+        best_score = -float("inf") if root.turn else float("inf")
+
+        for move, child in root.children:
+            score = minimax(child)
+            if root.turn:  # White maximizes
+                if best_move is None or score > best_score:
+                    best_score = score
+                    best_move = move
+            else:  # Black minimizes
+                if best_move is None or score < best_score:
+                    best_score = score
+                    best_move = move
+
+        elapsed_time = time.time() - start_time
+        logger.info(
+            f"QSearch finished in {elapsed_time:.3f}s | "
+            f"Nodes visited: {stats['nodes_visited']} | "
+            f"Unique Evals: {stats['unique_positions_evaluated']} | "
+            f"Max Depth: {stats['max_depth_reached']} | "
+            f"Batches: {stats['batches_processed']} | "
+            f"Best Move: {best_move} | "
+            f"Score: {best_score:.4f}"
+        )
+
+        return best_score, best_move
 
     def evaluate_position(
-        self, board: chess.Board, evals: int = 10
+        self, board: chess.Board, max_depth: int = 10
     ) -> Tuple[float, chess.Move]:
-        """Root search: evaluates all legal moves using batched alpha-beta."""
+        """Root search: evaluates position using batched quiescence search."""
         logger.debug(f"Starting eval: \n{board.fen()}")
 
-        self.tt = {}
+        score, best_move = self.batched_qsearch(board, max_depth=max_depth)
 
-        try:
-            self._get_position(board)
-        except KeyError:
-            logger.info(f"Position to yet evaluated, setting dummy entry")
-            self._store_position(board, float("NaN"), 1, None)
+        if best_move is None:
+            best_move = chess.Move.null()
 
-        for i in range(evals):
-            logger.debug("=====================")
-            logger.debug(f"Starting eval: {i+1}")
-            score, pv = self._explore_pv(board, depth=20)
-            logger.info(f"{score}: {pv}")
-
-        score, _, best_move = self._get_position(board)
         return score, best_move
-
-def main():
-    from neuralchess.models import load_model
-    checkpoint = "./checkpoints/transformer_default.pt"
-    logging.basicConfig(level=logging.DEBUG)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(checkpoint, device)
-    engine = NeuralEngine(model=model, device=device)
-
-    postitions = [
-        chess.Board("r1b1k2r/pp1n1ppp/3Q4/2q1p3/6n1/5N2/PP3PPP/R3R1K1 w kq - 0 16"),
-        chess.Board("r1b1k2r/pp1n1ppp/3Q4/2q1p3/P5n1/5N2/1P3PPP/R3R1K1 b kq")
-    ]
-
-    for pos in postitions:
-        engine._evaluate_leaves(pos, pos.legal_moves)
-
-if __name__ == "__main__":
-    main()
