@@ -7,11 +7,14 @@ Usage:
 
 import argparse
 import os
+import random
 from pathlib import Path
 
+import chess
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 matplotlib.use("Agg")
 
@@ -191,6 +194,180 @@ def plot_eval_boxplot(evals: np.ndarray, output_path: str) -> None:
     plt.close()
 
 
+def plot_stm_eval_correlation(
+    tensors: np.ndarray, evals: np.ndarray, output_path: str
+) -> None:
+    if tensors.ndim < 4 or tensors.shape[1] < 13:
+        return
+
+    is_white = tensors[:, 12, 0, 0] > 0.5
+    is_black = ~is_white
+
+    white_evals = evals[is_white]
+    black_evals = evals[is_black]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    ax.hist(
+        white_evals,
+        bins=100,
+        density=True,
+        alpha=0.6,
+        color="#ff7f0e",
+        label=f"White to Move (n={len(white_evals):,})",
+    )
+    ax.hist(
+        black_evals,
+        bins=100,
+        density=True,
+        alpha=0.6,
+        color="#1f77b4",
+        label=f"Black to Move (n={len(black_evals):,})",
+    )
+
+    ax.axvline(
+        white_evals.mean(),
+        color="#ff7f0e",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"White Mean: {white_evals.mean():.4f}",
+    )
+    ax.axvline(
+        black_evals.mean(),
+        color="#1f77b4",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Black Mean: {black_evals.mean():.4f}",
+    )
+
+    ax.set_xlabel("Scaled Evaluation (0 to 1)")
+    ax.set_ylabel("Density")
+    ax.set_title("Evaluation Distribution by Side to Move")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def load_fens_from_csv(csv_path: str, sample_size: int = 5000) -> list[str]:
+    df = pd.read_csv(csv_path, usecols=["FEN"])
+    fens = df["FEN"].astype(str).tolist()
+    if len(fens) > sample_size:
+        fens = random.sample(fens, sample_size)
+    return fens
+
+
+def compute_position_types(fens: list[str]) -> dict:
+    counts = {
+        "quiet": 0,
+        "has_capture": 0,
+        "in_check": 0,
+        "has_check": 0,
+        "has_promotion": 0,
+        "has_castling": 0,
+        "invalid": 0,
+    }
+
+    for fen in fens:
+        try:
+            board = chess.Board(fen)
+        except ValueError:
+            counts["invalid"] += 1
+            continue
+
+        is_check = board.is_check()
+        has_capture = any(board.is_capture(m) for m in board.legal_moves)
+        has_promotion = any(m.promotion for m in board.legal_moves)
+        has_check = any(board.gives_check(m) for m in board.legal_moves)
+        has_castling = bool(board.castling_rights)
+
+        if is_check:
+            counts["in_check"] += 1
+        if has_capture:
+            counts["has_capture"] += 1
+        if has_check:
+            counts["has_check"] += 1
+        if has_promotion:
+            counts["has_promotion"] += 1
+        if has_castling:
+            counts["has_castling"] += 1
+
+        if not is_check and not has_capture:
+            counts["quiet"] += 1
+
+    total = len(fens) - counts["invalid"]
+    result: dict[str, float | int] = dict(counts)
+    result["total"] = total
+    for key in counts:
+        if key not in ("total", "invalid"):
+            result[f"{key}_pct"] = counts[key] / max(total, 1) * 100
+
+    return result
+
+
+def plot_position_types(pos_types: dict, output_path: str) -> None:
+    labels = [
+        "Quiet",
+        "Has Capture",
+        "In Check",
+        "Can Give Check",
+        "Has Promotion",
+        "Has Castling",
+    ]
+    keys = [
+        "quiet",
+        "has_capture",
+        "in_check",
+        "has_check",
+        "has_promotion",
+        "has_castling",
+    ]
+    values = [pos_types[k] for k in keys]
+    total = pos_types["total"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    colors = ["#2ca02c", "#ff7f0e", "#d62728", "#9467bd", "#e377c2", "#17becf"]
+
+    ax = axes[0]
+    bars = ax.barh(
+        labels[::-1], values[::-1], color=colors[::-1], edgecolor="white", linewidth=0.5
+    )
+    for i, (label, val) in enumerate(zip(labels[::-1], values[::-1])):
+        pct = val / max(total, 1) * 100
+        ax.text(
+            val + total * 0.005,
+            i,
+            f"{val:,} ({pct:.1f}%)",
+            va="center",
+            fontsize=9,
+        )
+    ax.set_xlabel("Count")
+    ax.set_title("Position Types (Sampled)")
+    ax.grid(True, axis="x", alpha=0.3)
+
+    ax = axes[1]
+    pcts = [val / max(total, 1) * 100 for val in values]
+    wedges, texts, autotexts = ax.pie(
+        pcts,
+        labels=labels,
+        autopct="%1.1f%%",
+        colors=colors,
+        startangle=90,
+        textprops={"fontsize": 9},
+    )
+    for autotext in autotexts:
+        autotext.set_color("white")
+        autotext.set_fontweight("bold")
+    ax.set_title("Position Type Distribution")
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 def plot_tensor_heatmap(tensors: np.ndarray, output_path: str) -> None:
     fig, axes = plt.subplots(2, 7, figsize=(18, 6))
 
@@ -241,7 +418,12 @@ def plot_tensor_heatmap(tensors: np.ndarray, output_path: str) -> None:
     plt.close()
 
 
-def print_stats_table(eval_stats: dict, tensor_stats: dict, stm_stats: dict) -> str:
+def print_stats_table(
+    eval_stats: dict,
+    tensor_stats: dict,
+    stm_stats: dict,
+    pos_types: dict | None = None,
+) -> str:
     lines = []
     lines.append("=" * 60)
     lines.append("  NeuralChess Dataset Analysis")
@@ -279,6 +461,26 @@ def print_stats_table(eval_stats: dict, tensor_stats: dict, stm_stats: dict) -> 
     else:
         lines.append(f"  {stm_stats['error']}")
 
+    if pos_types is not None:
+        lines.append("\n--- Position Types (Sampled) ---")
+        total = pos_types["total"]
+        lines.append(f"  Sample size:{total:>12,}")
+        labels = {
+            "quiet": "Quiet",
+            "has_capture": "Has Capture",
+            "in_check": "In Check",
+            "has_check": "Can Give Check",
+            "has_promotion": "Has Promotion",
+            "has_castling": "Has Castling",
+        }
+        for key, label in labels.items():
+            count = int(pos_types[key])
+            pct = pos_types[f"{key}_pct"]
+            lines.append(f"  {label}:{count:>12,} ({pct:.1f}%)")
+        invalid = int(pos_types["invalid"])
+        if invalid:
+            lines.append(f"  Invalid FENs:{invalid:>12,}")
+
     lines.append("\n" + "=" * 60)
     return "\n".join(lines)
 
@@ -293,6 +495,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--output", type=str, default="analysis/", help="Output directory for plots"
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help="Path to raw CSV with FEN column for position type analysis",
+    )
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=5000,
+        help="Number of FENs to sample for position type analysis",
     )
     args = parser.parse_args()
 
@@ -317,7 +531,24 @@ def main() -> None:
     plot_tensor_heatmap(tensors, os.path.join(args.output, "tensor_heatmap.png"))
     print(f"  Saved: {args.output}/tensor_heatmap.png")
 
-    stats_text = print_stats_table(eval_stats, tensor_stats, stm_stats)
+    plot_stm_eval_correlation(
+        tensors, evals, os.path.join(args.output, "stm_eval_correlation.png")
+    )
+    print(f"  Saved: {args.output}/stm_eval_correlation.png")
+
+    pos_types = None
+    if args.csv:
+        print(f"\nAnalyzing position types from: {args.csv}")
+        fens = load_fens_from_csv(args.csv, args.sample_size)
+        print(f"  Sampled {len(fens):,} positions...")
+        pos_types = compute_position_types(fens)
+
+        plot_position_types(pos_types, os.path.join(args.output, "position_types.png"))
+        print(f"  Saved: {args.output}/position_types.png")
+    else:
+        print("\nSkipping position type analysis (use --csv to enable)")
+
+    stats_text = print_stats_table(eval_stats, tensor_stats, stm_stats, pos_types)
     print(stats_text)
 
     stats_path = os.path.join(args.output, "stats.txt")
