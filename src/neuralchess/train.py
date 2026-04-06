@@ -314,7 +314,9 @@ def main() -> None:
         print(f"Config: {model_config}")
 
     if os.path.isfile(checkpoint_path):
-        print(f"WARNING: checkpoint {checkpoint_path} already exists. It will be overwritten.")
+        print(
+            f"WARNING: checkpoint {checkpoint_path} already exists. It will be overwritten."
+        )
 
     if args.resume:
         resume_path = os.path.join(args.checkpoint_dir, args.resume)
@@ -331,6 +333,8 @@ def main() -> None:
         model = build_model(model_type, model_config, device, args.compile)
         model.load_state_dict(model_state)
         start_epoch += 1
+        print(f"Successfully loaded model from {resume_path}")
+        print(f"Staring training from epoch {start_epoch}")
     else:
         model = build_model(model_type, model_config, device, args.compile)
 
@@ -464,7 +468,7 @@ if modal is not None:
     @app.function(
         image=image,
         volumes={"/vol": volume},
-        gpu="L40S",  # Automatically acquires an available GPU
+        gpu="A10",  # Automatically acquires an available GPU
         timeout=86400,  # 24 hour timeout for training
     )
     def modal_main(*args):
@@ -509,4 +513,4 @@ if modal is not None:
         print(f"🚀 Launching NeuralChess Training on Modal GPU...")
         print(f"Arguments forwarded: {args}")
         # Forward the arbitrary CLI arguments to the remote function
-        modal_main.remote(*args)
+        modal_main.spawn(*args)

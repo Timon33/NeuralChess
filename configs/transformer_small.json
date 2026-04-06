@@ -1,5 +1,5 @@
 {
   "d_model": 128,
-  "nhead": 4,
-  "num_layers": 4
+  "nhead": 8,
+  "num_layers": 6
 }

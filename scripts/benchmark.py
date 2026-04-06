@@ -651,7 +651,7 @@ def main() -> None:
             )
             sys.exit(1)
 
-    uci_script = Path(__file__).parent / "uci.py"
+    uci_script = Path(__file__).parent.parent / "src" / "neuralchess" / "uci.py"
     neural_cmd = [
         sys.executable,
         str(uci_script),
